@@ -8,7 +8,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use gb_core::{Button, Colorize, GameBoy, SCREEN_H, SCREEN_W};
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
@@ -116,12 +116,24 @@ impl State {
     }
 }
 
-thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State::new()) };
-}
+/// The frontend invokes the core's entry points from more than one thread: it
+/// registers callbacks (env, video, audio, input) on its main thread but runs
+/// frames on a dedicated emulation thread. So the state must be a single
+/// process-global, not thread-local — otherwise `retro_run` sees a fresh empty
+/// state with null callbacks (black screen, no audio). This mirrors how C
+/// libretro cores keep their state in plain `static`s.
+struct GlobalState(UnsafeCell<State>);
+
+// SAFETY: libretro serializes every call into the core — `retro_run`, the
+// `retro_set_*` registrations and load/unload never overlap — so there is never
+// concurrent access to the single STATE instance.
+unsafe impl Sync for GlobalState {}
+
+static STATE: GlobalState = GlobalState(UnsafeCell::new(State::new()));
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    STATE.with(|s| f(&mut s.borrow_mut()))
+    // SAFETY: see `GlobalState` — accesses are serialized by the frontend.
+    unsafe { f(&mut *STATE.0.get()) }
 }
 
 // --- Required libretro entry points ------------------------------------------
@@ -179,7 +191,7 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
         let vars = [
             retro_variable {
                 key: OPT_COLORIZE.as_ptr(),
-                value: c"Colorize GB (DMG) games; off|auto|grayscale".as_ptr(),
+                value: c"Colorize GB (DMG) games; auto|off|grayscale".as_ptr(),
             },
             retro_variable {
                 key: ptr::null(),
@@ -212,11 +224,11 @@ fn refresh_variables(s: &mut State) {
         )
     };
     if ok && !var.value.is_null() {
-        let val = unsafe { CStr::from_ptr(var.value) }.to_str().unwrap_or("off");
+        let val = unsafe { CStr::from_ptr(var.value) }.to_str().unwrap_or("auto");
         let mode = match val {
-            "auto" => Colorize::Auto,
+            "off" => Colorize::Off,
             "grayscale" => Colorize::Grayscale,
-            _ => Colorize::Off,
+            _ => Colorize::Auto,
         };
         if let Some(gb) = &mut s.gb {
             gb.set_colorization(mode);
@@ -281,8 +293,13 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
             );
         }
         s.rom = rom.clone();
-        s.gb = Some(GameBoy::new(rom));
-        refresh_variables(s); // apply the initial colorize setting
+        let mut gb = GameBoy::new(rom);
+        // Default to authentic per-game GBC colorization so DMG games look right
+        // out of the box (parity with Gambatte's default-on colorization). A
+        // host that exposes the option overrides this in refresh_variables.
+        gb.set_colorization(Colorize::Auto);
+        s.gb = Some(gb);
+        refresh_variables(s); // apply the host's colorize option, if any
     });
     true
 }
