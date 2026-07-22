@@ -7,7 +7,10 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 
+mod netpacket;
+
 use gb_core::{Button, Colorize, GameBoy, SCREEN_H, SCREEN_W};
+use netpacket::Pending;
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
@@ -292,6 +295,15 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
                 &mut fmt as *mut i32 as *mut c_void,
             );
         }
+        // Offer the link-cable (netpacket) interface so the host can wire us
+        // into its LAN netplay for GameLink. Harmless if the host ignores it.
+        if let Some(env) = s.env {
+            env(
+                netpacket::RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE,
+                &netpacket::CALLBACK as *const _ as *mut c_void,
+            );
+        }
+
         s.rom = rom.clone();
         let mut gb = GameBoy::new(rom);
         // Default to authentic per-game GBC colorization so DMG games look right
@@ -304,6 +316,25 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     true
 }
 
+/// Connect the netpacket transport to the running Game Boy's link cable. Called
+/// from `retro_run` (not from the netpacket callback) so it never re-enters the
+/// core `State` borrow.
+fn attach_netlink() {
+    with_state(|s| {
+        if let Some(gb) = &mut s.gb {
+            gb.connect_link(Box::new(netpacket::NetpacketLink));
+        }
+    });
+}
+
+fn detach_netlink() {
+    with_state(|s| {
+        if let Some(gb) = &mut s.gb {
+            gb.disconnect_link();
+        }
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn retro_unload_game() {
     with_state(|s| s.gb = None);
@@ -311,6 +342,18 @@ pub extern "C" fn retro_unload_game() {
 
 #[no_mangle]
 pub extern "C" fn retro_run() {
+    // Link-cable lifecycle + inbound drain, done outside the State borrow so the
+    // netpacket callbacks (which touch their own global) never nest it.
+    match netpacket::take_pending() {
+        Pending::Attach => attach_netlink(),
+        Pending::Detach => detach_netlink(),
+        Pending::None => {}
+    }
+    if netpacket::is_active() {
+        // Frontend calls our `receive` for each queued inbound byte.
+        netpacket::poll_receive();
+    }
+
     with_state(|s| {
         // Pick up any live change to the colorize option.
         if let Some(env) = s.env {
