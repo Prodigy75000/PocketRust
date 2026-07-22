@@ -1,0 +1,21 @@
+[package]
+name = "gb-runner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gb"
+path = "src/main.rs"
+
+[dependencies]
+gb-core = { path = "../gb-core" }
+minifb = "0.27"
+png = "0.17"
+
+[[bin]]
+name = "shot"
+path = "src/shot.rs"
+
+[[bin]]
+name = "rec"
+path = "src/rec.rs"

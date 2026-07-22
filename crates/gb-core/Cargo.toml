@@ -1,0 +1,11 @@
+[package]
+name = "gb-core"
+version = "0.1.0"
+edition = "2021"
+description = "A clean-room Game Boy (DMG) emulator core, written from scratch in Rust."
+
+[lib]
+name = "gb_core"
+path = "src/lib.rs"
+
+[dependencies]
