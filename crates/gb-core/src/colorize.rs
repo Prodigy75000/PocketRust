@@ -21,9 +21,6 @@ use crate::gbc_palettes::{
 const AMBIGUOUS_BASE: usize = 65;
 /// Stride between rows of the fourth-letter table.
 const LETTER_ROW: usize = 14;
-/// One past the last valid palette index (`fourth-letter len + ambiguous base`).
-const MAX_INDEX: usize = FOURTH_LETTERS.len() + AMBIGUOUS_BASE;
-
 /// How to colour a monochrome (DMG) game. Ignored for real CGB games.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Colorize {
@@ -91,24 +88,19 @@ fn gbc_palette_index(checksum: u8, fourth_letter: u8) -> Option<usize> {
     if pos < AMBIGUOUS_BASE {
         return Some(pos);
     }
-    // Ambiguous checksum: walk down the fourth-letter column until the 4th
-    // title letter matches, advancing the index by the column each row.
+    // Ambiguous checksum: the fourth-letter table and the palette-assignment
+    // table are parallel arrays for the ambiguous region (both start at
+    // AMBIGUOUS_BASE). Walk down this checksum's column (stride LETTER_ROW),
+    // and the matching slot's palette index is exactly AMBIGUOUS_BASE + letter.
     let col = pos - AMBIGUOUS_BASE;
-    let mut index = pos;
     let mut letter = col;
-    loop {
-        if letter >= FOURTH_LETTERS.len() {
-            return None;
-        }
+    while letter < FOURTH_LETTERS.len() {
         if FOURTH_LETTERS[letter] == fourth_letter {
-            return Some(index);
+            return Some(AMBIGUOUS_BASE + letter);
         }
-        index += col;
         letter += LETTER_ROW;
-        if index >= MAX_INDEX {
-            return None;
-        }
     }
+    None
 }
 
 /// Turn a palette index into the three resolved 4-colour palettes, applying the
@@ -119,21 +111,47 @@ fn palette_for_index(index: usize) -> DmgPalette {
     let flags = entry >> 5;
     let [e0, e1, e2] = triplet;
 
-    // Per the boot ROM: BGP is always the 3rd entry; OBP0 is the 3rd entry if
-    // bit 0 is set else the 1st; OBP1 is the 2nd if bit 2, else 3rd if bit 1,
-    // else the 1st.
-    let obp0 = if flags & 1 != 0 { e2 } else { e0 };
+    // Per the boot ROM (flags = entry >> 5, triplet = [e0, e1, e2]): BGP is
+    // always e2. OBP0 is e0 when bit 0 is set, else e2. OBP1 is e1 when bit 2
+    // is set, else e0 when bit 1 is set, else e2. Derived by constraint
+    // propagation over the PocketPalettes ground-truth pack, anchored on the
+    // flags=0b101 identity case (Metroid II + 7 unambiguous games).
+    let obp0 = if flags & 1 != 0 { e0 } else { e2 };
     let obp1 = if flags & 4 != 0 {
         e1
     } else if flags & 2 != 0 {
-        e2
-    } else {
         e0
+    } else {
+        e2
     };
     DmgPalette {
         bg: colors_at(e2),
         obj0: colors_at(obp0),
         obj1: colors_at(obp1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Metroid II (title "METROID2", checksum 0x46, 4th letter 'R') is a plain
+    // DMG game with an *ambiguous* checksum, so it exercises the fourth-letter
+    // disambiguation (-> palette index 80) and the OBP flag decode. Both were
+    // buggy: the index cursor advanced by the checksum column instead of
+    // LETTER_ROW (landing on 67 = all-green), and OBP0 selected e2 not e0.
+    // All three palettes are byte-exact against the on-hardware PocketPalettes
+    // .pal for Metroid II:
+    //   BG   = white / light-blue / blue / black
+    //   OBP0 = yellow / red / dark-red / black   (Samus suit, START text, cursor)
+    //   OBP1 = white / green / dark-green / black
+    #[test]
+    fn metroid2_matches_hardware_palette() {
+        assert_eq!(gbc_palette_index(0x46, b'R'), Some(80));
+        let pal = DmgPalette::auto(0x46, b'R', true);
+        assert_eq!(pal.bg, [0x00FFFFFF, 0x0063A5FF, 0x000000FF, 0x00000000]);
+        assert_eq!(pal.obj0, [0x00FFFF00, 0x00FF0000, 0x00630000, 0x00000000]);
+        assert_eq!(pal.obj1, [0x00FFFFFF, 0x007BFF31, 0x00008400, 0x00000000]);
     }
 }
 
