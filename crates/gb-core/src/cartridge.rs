@@ -28,6 +28,7 @@ pub struct Header {
 pub enum MbcKind {
     None,
     Mbc1,
+    Mbc2,
     Mbc3,
     Mbc5,
     Unsupported(u8),
@@ -47,6 +48,8 @@ impl Header {
             0x01 => (MbcKind::Mbc1, false),
             0x02 => (MbcKind::Mbc1, false),
             0x03 => (MbcKind::Mbc1, true),
+            0x05 => (MbcKind::Mbc2, false),
+            0x06 => (MbcKind::Mbc2, true),
             0x0F..=0x13 => (MbcKind::Mbc3, matches!(cart_type, 0x0F | 0x10 | 0x13)),
             0x19..=0x1E => (MbcKind::Mbc5, matches!(cart_type, 0x1B | 0x1E)),
             other => (MbcKind::Unsupported(other), false),
@@ -106,6 +109,10 @@ enum Mbc {
         /// false = ROM banking mode (0), true = RAM banking mode (1).
         banking_mode: bool,
     },
+    Mbc2 {
+        ram_enabled: bool,
+        rom_bank: u8, // 4 bits (1..15)
+    },
     Mbc3 {
         ram_enabled: bool,
         rom_bank: u8,  // 7 bits
@@ -121,7 +128,13 @@ enum Mbc {
 impl Cartridge {
     pub fn new(rom: Vec<u8>) -> Cartridge {
         let header = Header::parse(&rom);
-        let ram = vec![0u8; header.ram_banks.max(1) * 0x2000];
+        // MBC2 has 512 x 4-bit of built-in RAM (no external banks); everything
+        // else uses the header-declared bank count.
+        let ram = if header.mbc_kind == MbcKind::Mbc2 {
+            vec![0u8; 512]
+        } else {
+            vec![0u8; header.ram_banks.max(1) * 0x2000]
+        };
         let mbc = match header.mbc_kind {
             MbcKind::None => Mbc::None,
             MbcKind::Mbc1 => Mbc::Mbc1 {
@@ -129,6 +142,10 @@ impl Cartridge {
                 rom_bank: 1,
                 ram_bank: 0,
                 banking_mode: false,
+            },
+            MbcKind::Mbc2 => Mbc::Mbc2 {
+                ram_enabled: false,
+                rom_bank: 1,
             },
             MbcKind::Mbc3 => Mbc::Mbc3 {
                 ram_enabled: false,
@@ -178,6 +195,15 @@ impl Cartridge {
                 let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
                 *self.rom.get(offset).unwrap_or(&0xFF)
             }
+            Mbc::Mbc2 { rom_bank, .. } => {
+                let bank = if addr < 0x4000 {
+                    0
+                } else {
+                    ((*rom_bank as usize).max(1)) & (self.header.rom_banks - 1)
+                };
+                let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
+                *self.rom.get(offset).unwrap_or(&0xFF)
+            }
             Mbc::Mbc3 { rom_bank, .. } => {
                 let bank = if addr < 0x4000 {
                     0
@@ -216,6 +242,20 @@ impl Cartridge {
                 0x6000..=0x7FFF => *banking_mode = (val & 0x01) != 0,
                 _ => {}
             },
+            Mbc::Mbc2 {
+                ram_enabled,
+                rom_bank,
+            } => {
+                // One shared register in 0x0000..=0x3FFF: address bit 8 picks
+                // which. Clear -> RAM enable; set -> ROM bank (4 bits, min 1).
+                if addr < 0x4000 {
+                    if addr & 0x0100 == 0 {
+                        *ram_enabled = (val & 0x0F) == 0x0A;
+                    } else {
+                        *rom_bank = (val & 0x0F).max(1);
+                    }
+                }
+            }
             Mbc::Mbc3 {
                 ram_enabled,
                 rom_bank,
@@ -245,6 +285,7 @@ impl Cartridge {
         match &self.mbc {
             Mbc::None => true,
             Mbc::Mbc1 { ram_enabled, .. }
+            | Mbc::Mbc2 { ram_enabled, .. }
             | Mbc::Mbc3 { ram_enabled, .. }
             | Mbc::Mbc5 { ram_enabled, .. } => *ram_enabled,
         }
@@ -256,7 +297,13 @@ impl Cartridge {
             return 0xFF;
         }
         let idx = self.ram_offset(addr);
-        self.ram.get(idx).copied().unwrap_or(0xFF)
+        let val = self.ram.get(idx).copied().unwrap_or(0xFF);
+        // MBC2 RAM is 4-bit: the upper nibble reads back as 1s.
+        if matches!(self.mbc, Mbc::Mbc2 { .. }) {
+            val | 0xF0
+        } else {
+            val
+        }
     }
 
     /// Write to cartridge RAM (0xA000..=0xBFFF).
@@ -265,12 +312,21 @@ impl Cartridge {
             return;
         }
         let idx = self.ram_offset(addr);
+        let val = if matches!(self.mbc, Mbc::Mbc2 { .. }) {
+            val & 0x0F
+        } else {
+            val
+        };
         if let Some(cell) = self.ram.get_mut(idx) {
             *cell = val;
         }
     }
 
     fn ram_offset(&self, addr: u16) -> usize {
+        // MBC2's 512-half-byte RAM lives at 0xA000..=0xA1FF and echoes upward.
+        if matches!(self.mbc, Mbc::Mbc2 { .. }) {
+            return addr as usize & 0x1FF;
+        }
         let local = addr as usize & 0x1FFF;
         let bank = match &self.mbc {
             Mbc::Mbc1 {
@@ -286,7 +342,7 @@ impl Cartridge {
             }
             Mbc::Mbc3 { ram_bank, .. } => (*ram_bank & 0x03) as usize,
             Mbc::Mbc5 { ram_bank, .. } => *ram_bank as usize,
-            Mbc::None => 0,
+            Mbc::None | Mbc::Mbc2 { .. } => 0, // MBC2 handled above
         };
         // Guard against carts that report no RAM banks.
         let banks = self.header.ram_banks.max(1);
@@ -314,6 +370,13 @@ impl Cartridge {
                 c.u8(rom_bank);
                 c.u8(ram_bank);
                 c.bool(banking_mode);
+            }
+            Mbc::Mbc2 {
+                ram_enabled,
+                rom_bank,
+            } => {
+                c.bool(ram_enabled);
+                c.u8(rom_bank);
             }
             Mbc::Mbc3 {
                 ram_enabled,
