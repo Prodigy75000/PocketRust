@@ -6,6 +6,7 @@
 
 use crate::apu::Apu;
 use crate::cartridge::Cartridge;
+use crate::sgb::Sgb;
 use crate::save::Cursor;
 use crate::joypad::{Button, Joypad};
 use crate::ppu::Ppu;
@@ -49,11 +50,16 @@ pub struct Mmu {
     /// The serial port (link cable). With no peer it captures sent bytes, which
     /// is how Blargg's test ROMs report results.
     pub serial: Serial,
+
+    /// Super Game Boy command capture / palette state.
+    pub sgb: Sgb,
 }
 
 impl Mmu {
     pub fn new(cartridge: Cartridge, cgb: bool) -> Mmu {
+        let sgb = Sgb::new(cartridge.header.sgb_flag);
         Mmu {
+            sgb,
             cartridge,
             ppu: Ppu::new(cgb),
             apu: Apu::new(),
@@ -215,7 +221,10 @@ impl Mmu {
 
     fn write_io(&mut self, addr: u16, val: u8) {
         match addr {
-            0xFF00 => self.joypad.write(val),
+            0xFF00 => {
+                self.joypad.write(val);
+                self.sgb.write_p1(val);
+            }
             0xFF01 => self.serial.write_data(val),
             0xFF02 => self.serial.write_control(val),
             0xFF04 => {

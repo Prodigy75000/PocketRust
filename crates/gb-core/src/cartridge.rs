@@ -15,6 +15,8 @@ pub struct Header {
     pub ram_banks: usize,
     pub has_battery: bool,
     pub cgb_flag: u8,
+    /// SGB support flag (0x146): 0x03 means the cart carries SGB commands.
+    pub sgb_flag: u8,
     /// Sum of the title bytes (0x134..=0x143); the CGB boot ROM uses this to
     /// pick a colorization palette, and we reuse it for `Colorize::Auto`.
     pub title_checksum: u8,
@@ -76,6 +78,7 @@ impl Header {
             ram_banks,
             has_battery,
             cgb_flag: rom[0x0143],
+            sgb_flag: rom[0x0146],
             title_checksum: rom[0x0134..=0x0143]
                 .iter()
                 .fold(0u8, |acc, &b| acc.wrapping_add(b)),

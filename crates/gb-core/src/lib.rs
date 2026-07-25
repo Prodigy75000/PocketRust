@@ -18,6 +18,7 @@ mod mmu;
 mod ppu;
 mod save;
 mod serial;
+mod sgb;
 mod timer;
 
 pub use serial::{local_pair, LinkCable, LocalLink};
@@ -175,6 +176,16 @@ impl GameBoy {
     /// Used by the test harness to read Blargg's in-memory result protocol.
     pub fn peek(&self, addr: u16) -> u8 {
         self.mmu.read(addr)
+    }
+
+    /// Debug: (SGB commands seen as (code, data_len), whether SGB is active,
+    /// the four resolved SGB palettes). For validating SGB command capture.
+    pub fn sgb_debug(&self) -> (Vec<(u8, usize)>, bool, [[u32; 4]; 4]) {
+        (
+            self.mmu.sgb.log.clone(),
+            self.mmu.sgb.active,
+            self.mmu.sgb.palettes,
+        )
     }
 
     /// (PC, LCDC, LY, halted) — a quick peek for debugging stuck ROMs.
