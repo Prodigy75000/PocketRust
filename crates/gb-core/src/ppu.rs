@@ -55,8 +55,13 @@ pub struct Ppu {
     pub obj_pal_index: u8,
     pub obj_pal_autoinc: bool,
 
-    /// DMG colorization palettes (background + the two sprite palettes).
+    /// DMG colorization palettes (background + the two sprite palettes), from
+    /// the frontend's colorize option.
     dmg_palette: DmgPalette,
+    /// A Super Game Boy palette, once the running SGB cart supplies one. It
+    /// takes precedence over `dmg_palette`, so the colorize option can never
+    /// clobber the game's own SGB colors regardless of call order.
+    sgb_palette: Option<DmgPalette>,
 
     mode: Mode,
     line_cycles: u32,
@@ -98,6 +103,7 @@ impl Ppu {
             obj_pal_index: 0,
             obj_pal_autoinc: false,
             dmg_palette: DmgPalette::green(),
+            sgb_palette: None,
             mode: Mode::OamScan,
             line_cycles: 0,
             window_line: 0,
@@ -278,7 +284,7 @@ impl Ppu {
             self.render_bg_line();
         } else {
             let base = self.ly as usize * SCREEN_W;
-            let white = self.dmg_palette.bg[0];
+            let white = self.active_palette().bg[0];
             for x in 0..SCREEN_W {
                 self.framebuffer[base + x] = white;
                 self.bg_index[x] = 0;
@@ -465,12 +471,18 @@ impl Ppu {
         }
     }
 
+    /// The palette actually driving DMG output: the SGB palette if the cart has
+    /// supplied one, otherwise the frontend's colorization choice.
+    fn active_palette(&self) -> &DmgPalette {
+        self.sgb_palette.as_ref().unwrap_or(&self.dmg_palette)
+    }
+
     /// Resolve a background colour index to RGB.
     fn bg_color(&self, palette: u8, color: u8) -> Pixel {
         if self.cgb {
             cgb_rgb(&self.bg_pal, palette, color)
         } else {
-            self.dmg_palette.bg[apply_palette(self.bgp, color) as usize]
+            self.active_palette().bg[apply_palette(self.bgp, color) as usize]
         }
     }
 
@@ -479,15 +491,22 @@ impl Ppu {
         if self.cgb {
             cgb_rgb(&self.obj_pal, flags & 0x07, color)
         } else if flags & 0x10 != 0 {
-            self.dmg_palette.obj1[apply_palette(self.obp1, color) as usize]
+            self.active_palette().obj1[apply_palette(self.obp1, color) as usize]
         } else {
-            self.dmg_palette.obj0[apply_palette(self.obp0, color) as usize]
+            self.active_palette().obj0[apply_palette(self.obp0, color) as usize]
         }
     }
 
-    /// Choose the DMG colorization palettes (no effect in CGB mode).
+    /// Choose the DMG colorization palettes (no effect in CGB mode, and does not
+    /// override an active SGB palette).
     pub fn set_dmg_palette(&mut self, palette: DmgPalette) {
         self.dmg_palette = palette;
+    }
+
+    /// Apply the Super Game Boy's own palette; it takes precedence over the
+    /// frontend colorize option for the rest of the session.
+    pub fn set_sgb_palette(&mut self, palette: DmgPalette) {
+        self.sgb_palette = Some(palette);
     }
 
     pub(crate) fn transfer<C: crate::save::Cursor>(&mut self, c: &mut C) {
@@ -530,6 +549,19 @@ impl Ppu {
         c.bool(&mut self.vblank_interrupt);
         c.bool(&mut self.stat_interrupt);
         c.bool(&mut self.stat_line);
+
+        // The SGB palette overlay is part of state: a mid-game restore must keep
+        // the game's SGB colors rather than flash the colorize default until the
+        // next PAL command. (dmg_palette itself is config, restored separately.)
+        let mut present = self.sgb_palette.is_some() as u8;
+        c.u8(&mut present);
+        let mut pal = self.sgb_palette.unwrap_or_else(DmgPalette::green);
+        for arr in [&mut pal.bg, &mut pal.obj0, &mut pal.obj1] {
+            for v in arr.iter_mut() {
+                c.u32(v);
+            }
+        }
+        self.sgb_palette = if present != 0 { Some(pal) } else { None };
         // framebuffer, bg_index, bg_priority, dmg_palette are not part of state:
         // the first is re-rendered, the scratch is per-scanline, and the palette
         // is config restored from the colorize setting.

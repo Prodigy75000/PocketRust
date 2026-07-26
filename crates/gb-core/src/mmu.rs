@@ -178,7 +178,16 @@ impl Mmu {
 
     fn read_io(&self, addr: u16) -> u8 {
         match addr {
-            0xFF00 => self.joypad.read(),
+            0xFF00 => {
+                let v = self.joypad.read();
+                // In SGB multiplayer, a both-rows-deselected read reports the
+                // active controller's ID in the low nibble instead of $F.
+                if v & 0x30 == 0x30 {
+                    (v & 0xF0) | self.sgb.player_id_nibble()
+                } else {
+                    v
+                }
+            }
             0xFF01 => self.serial.read_data(),
             0xFF02 => self.serial.read_control(),
             0xFF04 => self.timer.div(),
@@ -224,6 +233,11 @@ impl Mmu {
             0xFF00 => {
                 self.joypad.write(val);
                 self.sgb.write_p1(val);
+                // An SGB PAL command supplies the game's own colors; these win
+                // over the frontend colorize option from here on.
+                if let Some(pal) = self.sgb.take_palette_update() {
+                    self.ppu.set_sgb_palette(pal);
+                }
             }
             0xFF01 => self.serial.write_data(val),
             0xFF02 => self.serial.write_control(val),

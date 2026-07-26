@@ -148,27 +148,50 @@ mod tests {
     #[test]
     fn metroid2_matches_hardware_palette() {
         assert_eq!(gbc_palette_index(0x46, b'R'), Some(80));
+        // GBC-corrected output (raw boot-ROM RGB555 run through gbc_correct):
+        //   BG   = white / muted blue / dark blue / black
+        //   OBP0 = Samus suit yellow / red / dark-red / black
+        //   OBP1 = white / muted green / dark-green / black
         let pal = DmgPalette::auto(0x46, b'R', true);
-        assert_eq!(pal.bg, [0x00FFFFFF, 0x0063A5FF, 0x000000FF, 0x00000000]);
-        assert_eq!(pal.obj0, [0x00FFFF00, 0x00FF0000, 0x00630000, 0x00000000]);
-        assert_eq!(pal.obj1, [0x00FFFFFF, 0x007BFF31, 0x00008400, 0x00000000]);
+        assert_eq!(pal.bg, [0x00F0F0F0, 0x0071B6D0, 0x000F3EAA, 0x00000000]);
+        assert_eq!(pal.obj0, [0x00E8BA4D, 0x00C9002E, 0x004E0012, 0x00000000]);
+        assert_eq!(pal.obj1, [0x00F0F0F0, 0x0083C656, 0x00106010, 0x00000000]);
+    }
+
+    #[test]
+    fn gbc_correction_tames_the_neon_default() {
+        // The unlicensed-game default palette's raw color 1 is 7BFF31 neon green
+        // (5-bit 0x0F,0x1F,0x06). Correction must desaturate it to a muted sage,
+        // not leave it as nuclear waste.
+        assert_eq!(gbc_correct(0x0F, 0x1F, 0x06), 0x0083C656);
+        // White and black are (near) fixed points.
+        assert_eq!(gbc_correct(0x1F, 0x1F, 0x1F), 0x00F0F0F0);
+        assert_eq!(gbc_correct(0x00, 0x00, 0x00), 0x00000000);
     }
 }
 
-/// Expand one boot-ROM palette (a byte offset into the colour table) to RGB888.
+/// Expand one boot-ROM palette (a byte offset into the colour table) to RGB888,
+/// through the Game Boy Color LCD color-correction matrix.
 fn colors_at(offset: u8) -> [u32; 4] {
     let row = PALETTE_COLORS[(offset / 8) as usize];
-    let expand = |v: u8| {
-        let v = v as u32;
-        (v << 3) | (v >> 2) // 5-bit -> 8-bit
-    };
     let mut out = [0u32; 4];
     for (c, slot) in out.iter_mut().enumerate() {
-        let r = expand(row[c * 3]);
-        let g = expand(row[c * 3 + 1]);
-        let b = expand(row[c * 3 + 2]);
-        *slot = (r << 16) | (g << 8) | b;
+        *slot = gbc_correct(row[c * 3], row[c * 3 + 1], row[c * 3 + 2]);
     }
     out
+}
+
+/// The Game Boy Color's LCD did not display raw RGB555 values; it ran them
+/// through a fixed response that heavily desaturates and slightly dims. Without
+/// it the boot-ROM palettes look like nuclear waste (e.g. the unlicensed-game
+/// default's `7BFF31` neon green). This is higan's integer GBC matrix, matching
+/// how real hardware (and Gambatte with color-correction on) actually look.
+/// Inputs are 5-bit channels; output is 0x00RRGGBB.
+pub(crate) fn gbc_correct(r: u8, g: u8, b: u8) -> u32 {
+    let (r, g, b) = (r as u32, g as u32, b as u32);
+    let rr = (r * 26 + g * 4 + b * 2).min(960) >> 2;
+    let gg = (g * 24 + b * 8).min(960) >> 2;
+    let bb = (r * 6 + g * 4 + b * 22).min(960) >> 2;
+    (rr << 16) | (gg << 8) | bb
 }
 

@@ -35,8 +35,20 @@ pub struct Sgb {
     packets_got: usize,
     expected: usize,
 
+    // --- multiplayer (MLT_REQ) read-back state ---
+    /// Number of controllers reported to the game (1, 2, or 4).
+    player_count: u8,
+    /// Which controller the game is currently reading (0-based).
+    player_index: u8,
+    /// Last P14/P15 select bits written, to detect the both-high rising edge
+    /// that advances the controller counter.
+    last_sel: u8,
+
     /// The four SGB palettes (SGB0..3), each 4 colors, resolved to RGB888.
     pub palettes: [[u32; 4]; 4],
+    /// Set when a PAL command changes `palettes`, so the MMU can push the new
+    /// colors into the PPU. Cleared by [`Sgb::take_palette_update`].
+    palette_dirty: bool,
 
     /// Debug: (command code, total data bytes) of each completed command.
     pub log: Vec<(u8, usize)>,
@@ -53,8 +65,39 @@ impl Sgb {
             data: Vec::new(),
             packets_got: 0,
             expected: 0,
+            player_count: 1,
+            player_index: 0,
+            last_sel: 0x30,
             palettes: [[0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]; 4],
+            palette_dirty: false,
             log: Vec::new(),
+        }
+    }
+
+    /// If a PAL command has arrived since the last call, hand back the SGB
+    /// background palette (SGB0) as the DMG colorization to apply. For now the
+    /// whole screen uses palette 0; per-region ATTR support comes later.
+    pub fn take_palette_update(&mut self) -> Option<crate::colorize::DmgPalette> {
+        if !self.palette_dirty {
+            return None;
+        }
+        self.palette_dirty = false;
+        let p = self.palettes[0];
+        Some(crate::colorize::DmgPalette {
+            bg: p,
+            obj0: p,
+            obj1: p,
+        })
+    }
+
+    /// The low nibble the joypad register should report when both rows are
+    /// deselected: the active controller's ID ($0F=P1, $0E=P2, ...). For a
+    /// single player (or a non-SGB cart) this is the usual $0F.
+    pub fn player_id_nibble(&self) -> u8 {
+        if self.enabled && self.player_count > 1 {
+            0x0F - self.player_index
+        } else {
+            0x0F
         }
     }
 
@@ -63,7 +106,14 @@ impl Sgb {
         if !self.enabled {
             return;
         }
-        match val & 0x30 {
+        let sel = val & 0x30;
+        // Multiplayer: a P15 (bit 5) low->high edge advances to the next
+        // controller. The game clocks this between per-player reads.
+        if self.player_count > 1 && sel & 0x20 != 0 && self.last_sel & 0x20 == 0 {
+            self.player_index = (self.player_index + 1) % self.player_count;
+        }
+        self.last_sel = sel;
+        match sel {
             0x00 => {
                 // Reset: start assembling a fresh packet.
                 self.bit_count = 0;
@@ -119,7 +169,7 @@ impl Sgb {
                 };
                 let d = &self.data;
                 let c0 = bgr555(d[1], d[2]);
-                let mut read = |base: usize| {
+                let read = |base: usize| {
                     [
                         c0,
                         bgr555(d[base], d[base + 1]),
@@ -129,8 +179,80 @@ impl Sgb {
                 };
                 self.palettes[a] = read(3);
                 self.palettes[b] = read(9);
+                self.palette_dirty = true;
             }
-            _ => {} // ATTR_*, PAL_TRN, PAL_SET, MASK_EN, MLT_REQ... later
+            // MLT_REQ: enable N-controller multiplayer. This is the SGB-detection
+            // handshake: once we answer with the player-ID read-back, the game
+            // knows it is on an SGB and proceeds to send its palette commands.
+            0x11 => {
+                self.player_count = match self.data[1] & 0x03 {
+                    0x01 => 2,
+                    0x03 => 4,
+                    _ => 1,
+                };
+                self.player_index = 0;
+            }
+            _ => {} // ATTR_*, PAL_TRN, PAL_SET, MASK_EN... later
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Clock a 16-byte SGB packet in over the P14/P15 pulse protocol.
+    fn send(sgb: &mut Sgb, bytes: &[u8; 16]) {
+        sgb.write_p1(0x00); // reset + start packet
+        for i in 0..128 {
+            let bit = (bytes[i / 8] >> (i % 8)) & 1;
+            sgb.write_p1(if bit == 0 { 0x20 } else { 0x10 }); // latch the bit
+            sgb.write_p1(0x30); // re-arm for the next bit
+        }
+    }
+
+    #[test]
+    fn mlt_req_handshake_reports_two_players() {
+        let mut sgb = Sgb::new(0x03);
+        let mut pkt = [0u8; 16];
+        pkt[0] = (0x11 << 3) | 1; // MLT_REQ, 1 packet
+        pkt[1] = 0x01; // two players
+        send(&mut sgb, &pkt);
+
+        // The read-back cycles P1 / P2 as the game clocks P15 low->high edges.
+        assert_eq!(sgb.player_id_nibble(), 0x0F); // player 1
+        sgb.write_p1(0x10);
+        sgb.write_p1(0x30);
+        assert_eq!(sgb.player_id_nibble(), 0x0E); // player 2
+        sgb.write_p1(0x10);
+        sgb.write_p1(0x30);
+        assert_eq!(sgb.player_id_nibble(), 0x0F); // wraps back to player 1
+    }
+
+    #[test]
+    fn pal01_decodes_and_flags_a_palette_update() {
+        let mut sgb = Sgb::new(0x03);
+        let mut pkt = [0u8; 16];
+        pkt[0] = (0x00 << 3) | 1; // PAL01, 1 packet
+        pkt[1] = 0x1F; // color 0 = BGR555 pure red (lo)
+        pkt[2] = 0x00; // (hi)
+        send(&mut sgb, &pkt);
+
+        assert_eq!(sgb.palettes[0][0], 0xFF0000);
+        assert_eq!(sgb.palettes[1][0], 0xFF0000); // shared color 0
+        let upd = sgb.take_palette_update().expect("PAL command marks dirty");
+        assert_eq!(upd.bg[0], 0xFF0000);
+        assert!(sgb.take_palette_update().is_none()); // dirty flag cleared
+    }
+
+    #[test]
+    fn non_sgb_cart_ignores_pulses() {
+        let mut sgb = Sgb::new(0x00);
+        let mut pkt = [0u8; 16];
+        pkt[0] = (0x11 << 3) | 1;
+        pkt[1] = 0x01;
+        send(&mut sgb, &pkt);
+        assert!(!sgb.active);
+        assert_eq!(sgb.player_id_nibble(), 0x0F);
     }
 }
