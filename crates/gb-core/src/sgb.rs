@@ -54,6 +54,12 @@ pub struct Sgb {
     /// then just a black placeholder). When false we stop overriding and let the
     /// normal colorization show, instead of blanking the screen. DK, Mole Mania.
     supported: bool,
+    /// A VRAM-transfer command just arrived; the PPU should freeze the display
+    /// so the transfer data isn't shown as garbage.
+    transfer_pending: bool,
+    /// MASK_EN state (0 normal, 1 freeze, 2 black, 3 backdrop) and its dirty bit.
+    mask: u8,
+    mask_dirty: bool,
 
     /// Debug: (command code, total data bytes) of each completed command.
     pub log: Vec<(u8, usize)>,
@@ -76,7 +82,28 @@ impl Sgb {
             palettes: [[0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]; 4],
             palette_dirty: false,
             supported: true,
+            transfer_pending: false,
+            mask: 0,
+            mask_dirty: false,
             log: Vec::new(),
+        }
+    }
+
+    /// Whether a VRAM transfer just started (consumes the flag). The PPU freezes
+    /// the display briefly so the transfer's on-screen data isn't shown.
+    pub fn take_transfer(&mut self) -> bool {
+        let t = self.transfer_pending;
+        self.transfer_pending = false;
+        t
+    }
+
+    /// The new MASK_EN state if it changed since the last call.
+    pub fn take_mask(&mut self) -> Option<u8> {
+        if self.mask_dirty {
+            self.mask_dirty = false;
+            Some(self.mask)
+        } else {
+            None
         }
     }
 
@@ -213,15 +240,29 @@ impl Sgb {
                 };
                 self.player_index = 0;
             }
-            // PAL_SET (0xA) / PAL_TRN (0xB) / ATTR_TRN (0x15): the cart's real
-            // colors live in a table transferred through VRAM, which we cannot
-            // yet read. Any inline PAL we captured is a placeholder, so stop
-            // overriding and let normal colorization show (else: black screen).
-            0x0A | 0x0B | 0x15 => {
+            // PAL_SET (0xA): selects palettes from a transferred table we can't
+            // read; stop overriding (else the black placeholder blanks the
+            // screen). It draws nothing itself, so no display freeze.
+            0x0A => {
                 self.supported = false;
                 self.palette_dirty = true;
             }
-            _ => {} // ATTR_BLK/DIV, CHR_TRN, PCT_TRN, MASK_EN... later
+            // PAL_TRN (0xB) / ATTR_TRN (0x15): same, and they transfer through
+            // VRAM (garbage on-screen), so also freeze the display.
+            0x0B | 0x15 => {
+                self.supported = false;
+                self.palette_dirty = true;
+                self.transfer_pending = true;
+            }
+            // MASK_EN: freeze / black / backdrop the display.
+            0x17 => {
+                self.mask = self.data[1] & 0x03;
+                self.mask_dirty = true;
+            }
+            // VRAM transfers (SOU_TRN, CHR_TRN, PCT_TRN, OBJ_TRN): the cart shows
+            // the transfer data on-screen for the SGB to read; freeze it away.
+            0x09 | 0x13 | 0x14 | 0x18 => self.transfer_pending = true,
+            _ => {} // ATTR_BLK/DIV, DATA_SND... later
         }
     }
 }
