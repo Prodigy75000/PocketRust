@@ -54,8 +54,11 @@ impl Cpu {
     /// instruction), tick the rest of the machine for the elapsed cycles, and
     /// return how many T-cycles passed.
     pub fn step(&mut self, mmu: &mut Mmu) -> u32 {
+        mmu.begin_instr();
         let cycles = self.dispatch(mmu);
-        mmu.step(cycles);
+        // Memory accesses ticked their own M-cycles during dispatch; settle the
+        // internal cycles so the machine advances exactly `cycles` in total.
+        mmu.settle(cycles);
         cycles
     }
 

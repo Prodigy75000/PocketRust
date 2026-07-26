@@ -53,6 +53,12 @@ pub struct Mmu {
 
     /// Super Game Boy command capture / palette state.
     pub sgb: Sgb,
+
+    /// T-cycles ticked so far within the current instruction. The CPU ticks the
+    /// timed devices as each memory access happens (M-cycle granularity), then
+    /// `settle` tops up any internal cycles to reach the instruction's total.
+    /// Always 0 at an instruction boundary, so it is not part of save state.
+    step_acc: u32,
 }
 
 impl Mmu {
@@ -78,6 +84,7 @@ impl Mmu {
             hdma_len: 0xFF,
             hdma_active: false,
             serial: Serial::new(),
+            step_acc: 0,
         }
     }
 
@@ -106,8 +113,25 @@ impl Mmu {
         c.bool(&mut self.hdma_active);
     }
 
-    /// Advance all timed sub-devices, then fold their interrupt lines into IF.
-    pub fn step(&mut self, cycles: u32) {
+    /// Begin a new instruction: reset the per-instruction tick accumulator.
+    pub fn begin_instr(&mut self) {
+        self.step_acc = 0;
+    }
+
+    /// Top up the timed devices so this instruction's total elapsed T-cycles
+    /// equals `total` (the opcode table value). The memory accesses already
+    /// ticked their M-cycles; this covers the purely-internal cycles.
+    pub fn settle(&mut self, total: u32) {
+        if total > self.step_acc {
+            self.tick(total - self.step_acc);
+        }
+    }
+
+    /// Advance all timed sub-devices by `cycles` T-cycles, then fold their
+    /// interrupt lines into IF. The CPU calls this per memory access so that a
+    /// later access in the same instruction observes the advanced device state.
+    pub fn tick(&mut self, cycles: u32) {
+        self.step_acc += cycles;
         // The timer/DIV run at the CPU clock (which doubles in CGB fast mode),
         // while the PPU and APU are tied to wall-clock, so they advance at half
         // the CPU cycle count when double speed is engaged.

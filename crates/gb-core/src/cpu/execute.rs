@@ -11,21 +11,25 @@ use crate::mmu::Mmu;
 impl Cpu {
     // --- Memory / immediate access -----------------------------------------
 
-    fn read8(&self, mmu: &Mmu, addr: u16) -> u8 {
+    /// A bus read is one M-cycle: the machine advances 4 T-cycles, then the
+    /// value is sampled, so the read observes the just-elapsed device state.
+    fn read8(&self, mmu: &mut Mmu, addr: u16) -> u8 {
+        mmu.tick(4);
         mmu.read(addr)
     }
     fn write8(&mut self, mmu: &mut Mmu, addr: u16, val: u8) {
+        mmu.tick(4);
         mmu.write(addr, val);
     }
 
     /// Fetch the 8-bit immediate at PC and advance.
-    fn imm8(&mut self, mmu: &Mmu) -> u8 {
-        let v = mmu.read(self.reg.pc);
+    fn imm8(&mut self, mmu: &mut Mmu) -> u8 {
+        let v = self.read8(mmu, self.reg.pc);
         self.reg.pc = self.reg.pc.wrapping_add(1);
         v
     }
     /// Fetch the little-endian 16-bit immediate at PC and advance.
-    fn imm16(&mut self, mmu: &Mmu) -> u16 {
+    fn imm16(&mut self, mmu: &mut Mmu) -> u16 {
         let lo = self.imm8(mmu) as u16;
         let hi = self.imm8(mmu) as u16;
         hi << 8 | lo
@@ -37,7 +41,7 @@ impl Cpu {
         self.reg.sp = self.reg.sp.wrapping_sub(1);
         self.write8(mmu, self.reg.sp, val as u8);
     }
-    fn pop16(&mut self, mmu: &Mmu) -> u16 {
+    fn pop16(&mut self, mmu: &mut Mmu) -> u16 {
         let lo = self.read8(mmu, self.reg.sp) as u16;
         self.reg.sp = self.reg.sp.wrapping_add(1);
         let hi = self.read8(mmu, self.reg.sp) as u16;
@@ -47,7 +51,7 @@ impl Cpu {
 
     /// The 8-bit register selector used across the 0x40-0xBF blocks and CB ops.
     /// 0=B 1=C 2=D 3=E 4=H 5=L 6=(HL) 7=A. Returns cycles cost via caller.
-    fn get_r(&self, mmu: &Mmu, sel: u8) -> u8 {
+    fn get_r(&self, mmu: &mut Mmu, sel: u8) -> u8 {
         match sel {
             0 => self.reg.b,
             1 => self.reg.c,
@@ -155,7 +159,7 @@ impl Cpu {
 
     /// The shared core of ADD SP,e8 and LD HL,SP+e8. Flags come from the low
     /// byte addition, which is the notorious part of these two instructions.
-    fn add_sp_e8(&mut self, mmu: &Mmu) -> u16 {
+    fn add_sp_e8(&mut self, mmu: &mut Mmu) -> u16 {
         let e = self.imm8(mmu) as i8 as i16 as u16;
         let sp = self.reg.sp;
         self.reg.set_flag(FLAG_Z, false);
@@ -196,7 +200,7 @@ impl Cpu {
 
     // --- Control-flow helpers ----------------------------------------------
 
-    fn jr(&mut self, mmu: &Mmu) {
+    fn jr(&mut self, mmu: &mut Mmu) {
         let e = self.imm8(mmu) as i8 as i16;
         self.reg.pc = (self.reg.pc as i16).wrapping_add(e) as u16;
     }
