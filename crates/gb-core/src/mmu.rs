@@ -239,12 +239,9 @@ impl Mmu {
                 if let Some(pal) = self.sgb.take_palette_override() {
                     self.ppu.set_sgb_palette(pal);
                 }
-                // Hide SGB VRAM-transfer garbage and honor MASK_EN.
+                // Blank SGB VRAM-transfer garbage out of the displayed frame.
                 if self.sgb.take_transfer() {
                     self.ppu.sgb_begin_transfer();
-                }
-                if let Some(mask) = self.sgb.take_mask() {
-                    self.ppu.set_sgb_mask(mask);
                 }
             }
             0xFF01 => self.serial.write_data(val),

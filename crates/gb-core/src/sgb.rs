@@ -54,12 +54,9 @@ pub struct Sgb {
     /// then just a black placeholder). When false we stop overriding and let the
     /// normal colorization show, instead of blanking the screen. DK, Mole Mania.
     supported: bool,
-    /// A VRAM-transfer command just arrived; the PPU should freeze the display
+    /// A VRAM-transfer command just arrived; the PPU should blank the display
     /// so the transfer data isn't shown as garbage.
     transfer_pending: bool,
-    /// MASK_EN state (0 normal, 1 freeze, 2 black, 3 backdrop) and its dirty bit.
-    mask: u8,
-    mask_dirty: bool,
 
     /// Debug: (command code, total data bytes) of each completed command.
     pub log: Vec<(u8, usize)>,
@@ -83,8 +80,6 @@ impl Sgb {
             palette_dirty: false,
             supported: true,
             transfer_pending: false,
-            mask: 0,
-            mask_dirty: false,
             log: Vec::new(),
         }
     }
@@ -97,15 +92,6 @@ impl Sgb {
         t
     }
 
-    /// The new MASK_EN state if it changed since the last call.
-    pub fn take_mask(&mut self) -> Option<u8> {
-        if self.mask_dirty {
-            self.mask_dirty = false;
-            Some(self.mask)
-        } else {
-            None
-        }
-    }
 
     /// If the palette override may have changed since the last call, hand back
     /// the new state: `Some(Some(pal))` to override colorization, `Some(None)`
@@ -254,15 +240,14 @@ impl Sgb {
                 self.palette_dirty = true;
                 self.transfer_pending = true;
             }
-            // MASK_EN: freeze / black / backdrop the display.
-            0x17 => {
-                self.mask = self.data[1] & 0x03;
-                self.mask_dirty = true;
-            }
             // VRAM transfers (SOU_TRN, CHR_TRN, PCT_TRN, OBJ_TRN): the cart shows
-            // the transfer data on-screen for the SGB to read; freeze it away.
+            // the transfer data on-screen for the SGB to read; blank it away.
             0x09 | 0x13 | 0x14 | 0x18 => self.transfer_pending = true,
-            _ => {} // ATTR_BLK/DIV, DATA_SND... later
+            // MASK_EN (0x17) is deliberately NOT honored: a freeze/black mask
+            // persists until the cart cancels it, and some carts (Donkey Kong)
+            // never send the cancel in our timing, which would leave the screen
+            // stuck. The transfer blanking above already hides the init garbage.
+            _ => {} // ATTR_BLK/DIV, DATA_SND, MASK_EN... ignored
         }
     }
 }

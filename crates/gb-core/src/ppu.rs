@@ -62,14 +62,10 @@ pub struct Ppu {
     /// takes precedence over `dmg_palette`, so the colorize option can never
     /// clobber the game's own SGB colors regardless of call order.
     sgb_palette: Option<DmgPalette>,
-    /// SGB MASK_EN display mask: 0 normal, 1 freeze, 2 black, 3 backdrop.
-    sgb_mask: u8,
-    /// Frames left to freeze the display while an SGB VRAM transfer is in flight
+    /// Frames left to blank the display while an SGB VRAM transfer is in flight
     /// (CHR/PCT/PAL/ATTR_TRN show their data on-screen as garbage; real SGB and
-    /// Gambatte hide it by holding the last good frame). Counts down per frame.
+    /// Gambatte hide it). Counts down per frame.
     sgb_freeze: u8,
-    /// The frame held on-screen while frozen (snapshot from before the freeze).
-    sgb_frozen: [Pixel; SCREEN_W * SCREEN_H],
 
     mode: Mode,
     line_cycles: u32,
@@ -112,9 +108,7 @@ impl Ppu {
             obj_pal_autoinc: false,
             dmg_palette: DmgPalette::green(),
             sgb_palette: None,
-            sgb_mask: 0,
             sgb_freeze: 0,
-            sgb_frozen: [0; SCREEN_W * SCREEN_H],
             mode: Mode::OamScan,
             line_cycles: 0,
             window_line: 0,
@@ -522,11 +516,6 @@ impl Ppu {
         self.sgb_palette = palette;
     }
 
-    /// Set the SGB MASK_EN state (0 normal, 1 freeze, 2 black, 3 backdrop).
-    pub fn set_sgb_mask(&mut self, mask: u8) {
-        self.sgb_mask = mask;
-    }
-
     /// An SGB VRAM transfer is starting. The cart draws the transfer data across
     /// the screen (as garbage) over the ~14 frames leading up to *each* transfer
     /// command, so we blank the display for a window wide enough to bridge the
@@ -540,15 +529,12 @@ impl Ppu {
         self.sgb_freeze = 90;
     }
 
-    /// Apply the SGB display override to the just-finished frame.
+    /// Blank the just-finished frame while an SGB VRAM transfer is in flight, so
+    /// the transfer data isn't shown as garbage.
     fn apply_sgb_mask(&mut self) {
         self.sgb_freeze = self.sgb_freeze.saturating_sub(1);
-        match self.sgb_mask {
-            2 => self.framebuffer = [0x0000_0000; SCREEN_W * SCREEN_H], // MASK_EN black
-            3 => self.framebuffer = [self.active_palette().bg[0]; SCREEN_W * SCREEN_H],
-            1 => self.framebuffer = self.sgb_frozen, // MASK_EN freeze
-            _ if self.sgb_freeze > 0 => self.framebuffer = [0x0000_0000; SCREEN_W * SCREEN_H],
-            _ => self.sgb_frozen = self.framebuffer, // good frame; keep for MASK_EN freeze
+        if self.sgb_freeze > 0 {
+            self.framebuffer = [0x0000_0000; SCREEN_W * SCREEN_H];
         }
     }
 
@@ -605,7 +591,6 @@ impl Ppu {
             }
         }
         self.sgb_palette = if present != 0 { Some(pal) } else { None };
-        c.u8(&mut self.sgb_mask);
         c.u8(&mut self.sgb_freeze);
         // framebuffer, bg_index, bg_priority, dmg_palette are not part of state:
         // the first is re-rendered, the scratch is per-scanline, and the palette

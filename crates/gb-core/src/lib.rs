@@ -189,6 +189,11 @@ impl GameBoy {
     }
 
     /// (PC, LCDC, LY, halted) — a quick peek for debugging stuck ROMs.
+    /// Debug: interrupt master enable, for diagnosing stuck interrupt waits.
+    pub fn debug_ime(&self) -> bool {
+        self.cpu.ime
+    }
+
     pub fn debug_state(&self) -> (u16, u8, u8, bool) {
         (
             self.cpu.reg.pc,
