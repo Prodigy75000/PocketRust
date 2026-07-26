@@ -233,9 +233,10 @@ impl Mmu {
             0xFF00 => {
                 self.joypad.write(val);
                 self.sgb.write_p1(val);
-                // An SGB PAL command supplies the game's own colors; these win
-                // over the frontend colorize option from here on.
-                if let Some(pal) = self.sgb.take_palette_update() {
+                // An SGB PAL command supplies the game's own colors (which win
+                // over the frontend colorize option); or signals we should stop
+                // overriding for a cart whose palettes we cannot follow.
+                if let Some(pal) = self.sgb.take_palette_override() {
                     self.ppu.set_sgb_palette(pal);
                 }
             }

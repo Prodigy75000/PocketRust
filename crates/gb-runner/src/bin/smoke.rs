@@ -11,8 +11,10 @@ use gb_core::{Button, Colorize, GameBoy};
 use std::collections::HashSet;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-const FRAMES: u32 = 600; // ~10s at 60 fps
+const FRAMES: u32 = 900; // ~15s at 60 fps (some intros are slow, e.g. Pokemon)
 
 /// Mirror cartridge.rs: the MBC types the core actually maps to a real mapper.
 fn core_supports_mbc(t: u8) -> bool {
@@ -47,10 +49,13 @@ fn run_one(rom: Vec<u8>) -> (bool, bool) {
     let mut any_audio = false;
     let mut max_colors = 0usize;
     for f in 0..FRAMES {
-        // Blindly pulse Start then A each 64-frame window to advance intros.
-        let phase = f % 64;
-        gb.set_button(Button::Start, phase < 6);
-        gb.set_button(Button::A, (32..38).contains(&phase));
+        // Let the game render its own intro/title uninterrupted for the first
+        // two-thirds (a boot test only needs to see it draw *something*, and
+        // mashing early skips intros before they render -> false "blank"), then
+        // pulse Start in the last third for games parked on a "press start" boot
+        // screen. Captures both attract-intro games (Pokemon) and press-start.
+        let mashing = f >= FRAMES * 2 / 3;
+        gb.set_button(Button::Start, mashing && f % 16 < 4);
         gb.step_frame();
         if !any_audio && gb.take_audio().iter().any(|s| s.unsigned_abs() > 64) {
             any_audio = true;
@@ -63,45 +68,111 @@ fn run_one(rom: Vec<u8>) -> (bool, bool) {
     (max_colors <= 1, !any_audio)
 }
 
+/// Recursively collect every .gb / .gbc ROM under `dir` (the SMDB packs nest
+/// ROMs several folders deep, by region and SGB/GBC category).
+fn collect_roms(dir: &PathBuf, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            collect_roms(&p, out);
+        } else if p
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("gb") || e.eq_ignore_ascii_case("gbc"))
+        {
+            out.push(p);
+        }
+    }
+}
+
 fn main() {
-    let dir = std::env::args().nth(1).expect("usage: smoke <dir>");
-    let mut roms: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .expect("read dir")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gb")))
-        .collect();
+    let dir = PathBuf::from(std::env::args().nth(1).expect("usage: smoke <dir>"));
+    let mut roms: Vec<PathBuf> = Vec::new();
+    collect_roms(&dir, &mut roms);
     roms.sort();
 
     panic::set_hook(Box::new(|_| {})); // silence per-ROM panic spew
-    let (mut panics, mut unsup, mut blank, mut silent) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut clean = 0u32;
 
-    for (i, p) in roms.iter().enumerate() {
-        let name = p.file_stem().unwrap().to_string_lossy().to_string();
-        let bytes = std::fs::read(p).unwrap();
-        let ctype = *bytes.get(0x147).unwrap_or(&0);
-        eprintln!("[{}/{}] {}", i + 1, roms.len(), name); // progress => pinpoints a hang
-        if !core_supports_mbc(ctype) {
-            unsup.push(format!("{} [{}]", name, mbc_name(ctype)));
-            continue;
-        }
-        match panic::catch_unwind(AssertUnwindSafe(|| run_one(bytes))) {
-            Err(_) => panics.push(name),
-            Ok((b, s)) => {
-                if b {
-                    blank.push(name.clone());
+    #[derive(Default)]
+    struct Report {
+        panics: Vec<String>,
+        unsup: Vec<String>,
+        blank: Vec<String>,
+        silent: Vec<String>,
+        clean: u32,
+    }
+
+    let total = roms.len();
+    let roms = Arc::new(roms);
+    let report = Arc::new(Mutex::new(Report::default()));
+    let next = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicUsize::new(0));
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+
+    let handles: Vec<_> = (0..workers)
+        .map(|_| {
+            let (roms, report, next, done) =
+                (roms.clone(), report.clone(), next.clone(), done.clone());
+            std::thread::spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= total {
+                    break;
                 }
-                if s {
-                    silent.push(name.clone());
+                let p = &roms[i];
+                let name = p.file_stem().unwrap().to_string_lossy().to_string();
+                let bytes = std::fs::read(p).unwrap();
+                let ctype = *bytes.get(0x147).unwrap_or(&0);
+                let outcome = if !core_supports_mbc(ctype) {
+                    Err(mbc_name(ctype))
+                } else {
+                    Ok(panic::catch_unwind(AssertUnwindSafe(|| run_one(bytes))))
+                };
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                if n % 200 == 0 {
+                    eprintln!("[{}/{}]", n, total);
                 }
-                if !b && !s {
-                    clean += 1;
+                let mut r = report.lock().unwrap();
+                match outcome {
+                    Err(mbc) => r.unsup.push(format!("{} [{}]", name, mbc)),
+                    Ok(Err(_)) => r.panics.push(name),
+                    Ok(Ok((b, s))) => {
+                        if b {
+                            r.blank.push(name.clone());
+                        }
+                        if s {
+                            r.silent.push(name.clone());
+                        }
+                        if !b && !s {
+                            r.clean += 1;
+                        }
+                    }
                 }
-            }
-        }
+            })
+        })
+        .collect();
+    for h in handles {
+        let _ = h.join();
     }
     let _ = panic::take_hook();
+
+    let mut report = Arc::try_unwrap(report).ok().unwrap().into_inner().unwrap();
+    for v in [
+        &mut report.panics,
+        &mut report.unsup,
+        &mut report.blank,
+        &mut report.silent,
+    ] {
+        v.sort();
+    }
+    let (panics, unsup, blank, silent, clean) = (
+        report.panics,
+        report.unsup,
+        report.blank,
+        report.silent,
+        report.clean,
+    );
 
     let group = |title: &str, v: &[String]| {
         println!("\n{} ({})", title, v.len());

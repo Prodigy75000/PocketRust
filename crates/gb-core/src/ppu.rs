@@ -503,10 +503,11 @@ impl Ppu {
         self.dmg_palette = palette;
     }
 
-    /// Apply the Super Game Boy's own palette; it takes precedence over the
-    /// frontend colorize option for the rest of the session.
-    pub fn set_sgb_palette(&mut self, palette: DmgPalette) {
-        self.sgb_palette = Some(palette);
+    /// Set (or clear) the Super Game Boy's own palette. `Some` takes precedence
+    /// over the frontend colorize option; `None` releases it back to the normal
+    /// colorization (used when a cart's SGB palette path is unsupported).
+    pub fn set_sgb_palette(&mut self, palette: Option<DmgPalette>) {
+        self.sgb_palette = palette;
     }
 
     pub(crate) fn transfer<C: crate::save::Cursor>(&mut self, c: &mut C) {

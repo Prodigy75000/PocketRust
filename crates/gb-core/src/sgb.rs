@@ -46,9 +46,14 @@ pub struct Sgb {
 
     /// The four SGB palettes (SGB0..3), each 4 colors, resolved to RGB888.
     pub palettes: [[u32; 4]; 4],
-    /// Set when a PAL command changes `palettes`, so the MMU can push the new
-    /// colors into the PPU. Cleared by [`Sgb::take_palette_update`].
+    /// Set when the palette override may have changed, so the MMU re-syncs it
+    /// into the PPU. Cleared by [`Sgb::take_palette_override`].
     palette_dirty: bool,
+    /// Cleared once the cart uses a palette path we do not implement (PAL_TRN /
+    /// PAL_SET transfer real colors through VRAM; the inline PAL we captured is
+    /// then just a black placeholder). When false we stop overriding and let the
+    /// normal colorization show, instead of blanking the screen. DK, Mole Mania.
+    supported: bool,
 
     /// Debug: (command code, total data bytes) of each completed command.
     pub log: Vec<(u8, usize)>,
@@ -70,19 +75,35 @@ impl Sgb {
             last_sel: 0x30,
             palettes: [[0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]; 4],
             palette_dirty: false,
+            supported: true,
             log: Vec::new(),
         }
     }
 
-    /// If a PAL command has arrived since the last call, hand back the SGB
-    /// background palette (SGB0) as the DMG colorization to apply. For now the
-    /// whole screen uses palette 0; per-region ATTR support comes later.
-    pub fn take_palette_update(&mut self) -> Option<crate::colorize::DmgPalette> {
+    /// If the palette override may have changed since the last call, hand back
+    /// the new state: `Some(Some(pal))` to override colorization, `Some(None)`
+    /// to stop overriding (fall back to colorization), or `None` if unchanged.
+    pub fn take_palette_override(&mut self) -> Option<Option<crate::colorize::DmgPalette>> {
         if !self.palette_dirty {
             return None;
         }
         self.palette_dirty = false;
+        Some(self.palette_override())
+    }
+
+    /// The palette to force, or None to leave colorization alone. We only drive
+    /// output from the inline PAL commands; if the cart uses transferred palettes
+    /// (`supported` is false) or set a degenerate all-one-color placeholder, we
+    /// bow out so the screen shows real colors instead of black. Palette 0 is
+    /// applied globally for now (per-region ATTR is a later step).
+    fn palette_override(&self) -> Option<crate::colorize::DmgPalette> {
+        if !self.supported {
+            return None;
+        }
         let p = self.palettes[0];
+        if p.iter().all(|&c| c == p[0]) {
+            return None;
+        }
         Some(crate::colorize::DmgPalette {
             bg: p,
             obj0: p,
@@ -192,7 +213,15 @@ impl Sgb {
                 };
                 self.player_index = 0;
             }
-            _ => {} // ATTR_*, PAL_TRN, PAL_SET, MASK_EN... later
+            // PAL_SET (0xA) / PAL_TRN (0xB) / ATTR_TRN (0x15): the cart's real
+            // colors live in a table transferred through VRAM, which we cannot
+            // yet read. Any inline PAL we captured is a placeholder, so stop
+            // overriding and let normal colorization show (else: black screen).
+            0x0A | 0x0B | 0x15 => {
+                self.supported = false;
+                self.palette_dirty = true;
+            }
+            _ => {} // ATTR_BLK/DIV, CHR_TRN, PCT_TRN, MASK_EN... later
         }
     }
 }
@@ -240,9 +269,31 @@ mod tests {
 
         assert_eq!(sgb.palettes[0][0], 0xFF0000);
         assert_eq!(sgb.palettes[1][0], 0xFF0000); // shared color 0
-        let upd = sgb.take_palette_update().expect("PAL command marks dirty");
+        let upd = sgb
+            .take_palette_override()
+            .expect("PAL command marks dirty")
+            .expect("non-degenerate palette overrides");
         assert_eq!(upd.bg[0], 0xFF0000);
-        assert!(sgb.take_palette_update().is_none()); // dirty flag cleared
+        assert!(sgb.take_palette_override().is_none()); // dirty flag cleared
+    }
+
+    #[test]
+    fn pal_transfer_disables_override_to_avoid_black_screen() {
+        // A cart that sets a black placeholder PAL then transfers its real
+        // colors via PAL_TRN/PAL_SET (which we don't follow) must NOT be left
+        // with the black override, or the whole screen goes black (Donkey Kong).
+        let mut sgb = Sgb::new(0x03);
+        let mut pal = [0u8; 16];
+        pal[0] = (0x00 << 3) | 1; // PAL01, all colors black
+        send(&mut sgb, &pal);
+        // Degenerate all-black palette: bow out even before the transfer command.
+        assert!(matches!(sgb.take_palette_override(), Some(None)));
+
+        let mut trn = [0u8; 16];
+        trn[0] = (0x0B << 3) | 1; // PAL_TRN
+        send(&mut sgb, &trn);
+        assert!(matches!(sgb.take_palette_override(), Some(None))); // stays released
+        assert!(!sgb.supported);
     }
 
     #[test]
