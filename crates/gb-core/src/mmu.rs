@@ -63,7 +63,18 @@ pub struct Mmu {
 
 impl Mmu {
     pub fn new(cartridge: Cartridge, cgb: bool) -> Mmu {
-        let sgb = Sgb::new(cartridge.header.sgb_flag);
+        // SGB command handling is deliberately left disabled (constructed as a
+        // non-SGB cart). Our SGB support is cosmetic-only (inline palettes) and
+        // incomplete: answering the MLT_REQ detection handshake commits carts to
+        // a full SGB setup (PAL_TRN/ATTR_TRN palette transfers via VRAM) we can't
+        // complete, which HANGS ~26 games (the whole Game & Watch / Game Boy
+        // Gallery series, Atelier GB, Sanrio Timenet, Hello Kitty, Medarot, Trade
+        // & Battle Card Hero...). A full-set scan found ZERO games that need SGB
+        // to boot, and mono SGB carts already get our GBC-auto colorization, so
+        // not detecting SGB is a pure compatibility win. The decoder below stays
+        // (unit-tested, and keeps the save-state layout stable) for a possible
+        // future full SGB implementation. See [[project_rustgameboy_core]].
+        let sgb = Sgb::new(0);
         Mmu {
             sgb,
             cartridge,
