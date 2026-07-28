@@ -24,7 +24,7 @@ type retro_input_poll_t = Option<unsafe extern "C" fn()>;
 type retro_input_state_t = Option<unsafe extern "C" fn(u32, u32, u32, u32) -> i16>;
 
 #[repr(C)]
-struct retro_system_info {
+pub struct retro_system_info {
     library_name: *const c_char,
     library_version: *const c_char,
     valid_extensions: *const c_char,
@@ -48,13 +48,13 @@ struct retro_system_timing {
 }
 
 #[repr(C)]
-struct retro_system_av_info {
+pub struct retro_system_av_info {
     geometry: retro_game_geometry,
     timing: retro_system_timing,
 }
 
 #[repr(C)]
-struct retro_game_info {
+pub struct retro_game_info {
     path: *const c_char,
     data: *const c_void,
     size: usize,

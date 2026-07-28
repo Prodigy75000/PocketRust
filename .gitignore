@@ -9,6 +9,10 @@
 **/*.rs.bk
 *.sav
 
+# Machine-specific cargo config (Android NDK linker paths differ per machine).
+# Copy .cargo/config.toml.example and set your own NDK path to cross-compile.
+/.cargo/config.toml
+
 # ROM images: ignore everywhere except the freely-distributable test ROMs
 # (Blargg + dmg/cgb-acid2) that the test suite needs.
 *.gb
