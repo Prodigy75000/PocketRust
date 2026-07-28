@@ -2,6 +2,7 @@
 name = "gb-core"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "A clean-room Game Boy (DMG) emulator core, written from scratch in Rust."
 
 [lib]

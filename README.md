@@ -74,4 +74,4 @@ To cross-compile the Android `.so`, copy `.cargo/config.toml.example` to
 
 ## License
 
-To be decided.
+GNU General Public License v3.0 or later. See [LICENSE](LICENSE).

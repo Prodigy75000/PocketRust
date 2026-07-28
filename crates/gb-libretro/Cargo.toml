@@ -2,6 +2,7 @@
 name = "gb-libretro"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [lib]
 # cdylib -> libgbcore_libretro.so; we rename to the libretro convention on deploy.
