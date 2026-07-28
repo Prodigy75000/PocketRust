@@ -1,11 +1,8 @@
 # PocketRust
 
-A clean-room Game Boy and Game Boy Color emulator core, written from scratch in
-Rust. No C, no bindings, no lifted code, just the hardware modelled from the docs.
-
-Built for fun. The CPU passes Blargg's full `cpu_instrs` suite and `instr_timing`,
-the PPU renders `dmg-acid2` and `cgb-acid2`, and it boots the great majority of
-the commercial library.
+A clean-room Game Boy and Game Boy Color emulator core written from scratch in Rust.
+No C, no bindings, and no lifted code, just the hardware modeled from the docs.
+The core passes major CPU timing and graphics compatibility tests and runs most commercial Game Boy and Game Boy Color titles.
 
 ## Status
 
