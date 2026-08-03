@@ -156,6 +156,9 @@ impl Mmu {
         let av_cycles = cycles >> (self.double_speed as u32);
         let entered_hblank = self.ppu.step(av_cycles);
         self.apu.step(av_cycles);
+        // The MBC3 RTC crystal keeps real time regardless of CPU speed, so it
+        // ticks on the wall-clock cycle count (no-op for non-RTC carts).
+        self.cartridge.tick_rtc(av_cycles);
         if entered_hblank && self.hdma_active {
             self.hdma_hblank_transfer();
         }

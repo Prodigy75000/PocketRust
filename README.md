@@ -14,7 +14,8 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Audio (APU) | ✅ all four channels (2 pulse, wave, noise), stereo; Blargg `dmg_sound` tests pass |
 | Timer | ✅ shared 16-bit divider model (DIV / TIMA / TMA / TAC) |
 | Interrupts | ✅ VBlank, STAT, Timer, Serial, Joypad |
-| Cartridges | ✅ no-MBC, MBC1, MBC2, MBC3, MBC5; battery-backed save RAM |
+| Cartridges | ✅ no-MBC, MBC1, MBC2, MBC3 (+ RTC), MBC5; battery-backed save RAM |
+| MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm` |
 | Colorization | ✅ automatic GBC-style palette for monochrome games |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer, local and over TCP between two instances |

@@ -25,8 +25,9 @@ pub use serial::{local_pair, LinkCable, LocalLink};
 
 use save::{ReadCursor, WriteCursor};
 
-/// Magic + version prefix for a save-state blob.
-const STATE_MAGIC: &[u8] = b"PRGB1";
+/// Magic + version prefix for a save-state blob. Bumped to 2 when the MBC3 RTC
+/// was added to the state (older blobs are cleanly refused rather than misread).
+const STATE_MAGIC: &[u8] = b"PRGB2";
 
 pub use apu::SAMPLE_RATE;
 pub use colorize::Colorize;
@@ -170,6 +171,8 @@ impl GameBoy {
         let ram = self.mmu.cartridge.ram_mut();
         let n = ram.len().min(data.len());
         ram[..n].copy_from_slice(&data[..n]);
+        // If this is an RTC cart and the save carried a clock footer, restore it.
+        self.mmu.cartridge.restore_rtc_from_footer();
     }
 
     /// Read a byte from the bus without side effects worth worrying about.

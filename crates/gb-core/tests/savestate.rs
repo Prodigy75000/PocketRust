@@ -75,3 +75,61 @@ fn rejects_garbage() {
     assert!(!gb.load_state(b"not a real state"));
     assert!(!gb.load_state(&[]));
 }
+
+/// Build a synthetic MBC3+TIMER cartridge whose boot code programs the RTC to a
+/// known, halted time (30 s, hour 7) and latches it, then spins. This lets us
+/// drive the real CPU -> MMU -> cartridge RTC path without a commercial ROM.
+fn rtc_rom() -> Vec<u8> {
+    let mut rom = vec![0u8; 0x8000];
+    rom[0x0147] = 0x10; // MBC3+TIMER+RAM+BATTERY
+    rom[0x0148] = 0x00; // 32 KiB
+    rom[0x0149] = 0x02; // 8 KiB RAM
+
+    // Entry at 0x0100: jump over the header to the program at 0x0150.
+    rom[0x0100] = 0x00; // NOP
+    rom[0x0101] = 0xC3; // JP 0x0150
+    rom[0x0102] = 0x50;
+    rom[0x0103] = 0x01;
+
+    // Hand-assembled program: A=v; LD (addr),A is `3E vv EA lo hi`.
+    let mut p = 0x0150;
+    let mut emit = |rom: &mut [u8], val: u8, addr: u16| {
+        rom[p] = 0x3E;
+        rom[p + 1] = val;
+        rom[p + 2] = 0xEA;
+        rom[p + 3] = (addr & 0xFF) as u8;
+        rom[p + 4] = (addr >> 8) as u8;
+        p += 5;
+    };
+    emit(&mut rom, 0x0A, 0x0000); // enable RAM/RTC
+    emit(&mut rom, 0x08, 0x4000); // select seconds register
+    emit(&mut rom, 30, 0xA000); // seconds = 30
+    emit(&mut rom, 0x0C, 0x4000); // select DH
+    emit(&mut rom, 0x40, 0xA000); // HALT the clock (freeze the time)
+    emit(&mut rom, 0x0A, 0x4000); // select hours register
+    emit(&mut rom, 7, 0xA000); // hours = 7
+    emit(&mut rom, 0x00, 0x6000); // latch step 0
+    emit(&mut rom, 0x01, 0x6000); // latch step 1 -> snapshot the time
+    emit(&mut rom, 0x08, 0x4000); // re-select seconds for read-back
+    rom[p] = 0x18; // JR -2 (spin)
+    rom[p + 1] = 0xFE;
+    rom
+}
+
+#[test]
+fn rtc_survives_save_state() {
+    let rom = rtc_rom();
+    let mut gb = GameBoy::new(rom.clone());
+    run(&mut gb, 3); // let the boot code program and latch the clock
+
+    // Seconds register is selected and latched to 30.
+    assert_eq!(gb.peek(0xA000), 30, "boot code should latch seconds = 30");
+
+    let state = gb.save_state();
+
+    // Restore into a fresh machine; the latched RTC time must come back.
+    let mut gb2 = GameBoy::new(rom);
+    assert!(gb2.load_state(&state));
+    assert_eq!(gb2.peek(0xA000), 30, "RTC seconds lost across save state");
+    assert_eq!(gb2.peek(0xA000), 30, "RTC read is side-effect free");
+}
