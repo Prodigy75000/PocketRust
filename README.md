@@ -63,14 +63,82 @@ cargo run --release -p gb-runner --bin smoke -- path/to/roms/
 
 ## libretro core
 
+`gb-libretro` is a standard libretro core (the full `retro_*` C ABI). It builds a
+single `cdylib` — one crate, one source of truth — that every Trophy Hub client
+loads by `dlopen` + `dlsym`: Android, desktop (Windows/macOS/Linux) and iOS. The
+output is named for the libretro convention (`gbcore_libretro`), so the file is:
+
+| Platform | Target triple | Output file |
+|----------|---------------|-------------|
+| Linux    | host          | `libgbcore_libretro.so` |
+| Windows  | host          | `gbcore_libretro.dll` |
+| macOS    | host          | `libgbcore_libretro.dylib` |
+| Android arm64 | `aarch64-linux-android` | `libgbcore_libretro.so` |
+| Android arm32 | `armv7-linux-androideabi` | `libgbcore_libretro.so` |
+| iOS device    | `aarch64-apple-ios` | `libgbcore_libretro.dylib` |
+| iOS simulator (Apple Silicon) | `aarch64-apple-ios-sim` | `libgbcore_libretro.dylib` |
+| iOS simulator (Intel)         | `x86_64-apple-ios`      | `libgbcore_libretro.dylib` |
+
+All builds are release + LTO (`[profile.release]` in the workspace `Cargo.toml`).
+The library carries no non-Rust dependencies, so cross-compiling only needs a
+linker for the target.
+
+### Desktop (Windows `.dll`, macOS `.dylib`, Linux `.so`)
+
 ```sh
-# Native build -> target/release/libgbcore_libretro.{so,dll,dylib}
 cargo build --release -p gb-libretro
+# -> target/release/{libgbcore_libretro.so | gbcore_libretro.dll | libgbcore_libretro.dylib}
 ```
 
-To cross-compile the Android `.so`, copy `.cargo/config.toml.example` to
-`.cargo/config.toml`, point the linker lines at your NDK install, and build with
-`--target aarch64-linux-android`.
+Build on the OS you are targeting (or with the matching `--target`). No config
+file is needed for host builds.
+
+### Android (`.so`)
+
+```sh
+rustup target add aarch64-linux-android armv7-linux-androideabi
+cp .cargo/config.toml.example .cargo/config.toml
+# edit .cargo/config.toml: point the two `linker =` lines at your NDK's clang wrappers
+
+cargo build --release -p gb-libretro --target aarch64-linux-android
+cargo build --release -p gb-libretro --target armv7-linux-androideabi
+# -> target/<triple>/release/libgbcore_libretro.so
+```
+
+The config pins `-Wl,-z,max-page-size=16384` so the `.so` is 16 KB-aligned —
+required or the Play Store blocks uploads targeting API 35+. Drop the resulting
+`.so` into the app's `jniLibs/<abi>/`.
+
+### iOS (`.dylib`, embedded in a co-signed `.framework`)
+
+The iOS host `dlopen`s each core from an embedded, co-signed framework (dlsym
+loader — same path Gambatte takes), so the core is a plain `cdylib`; no
+`staticlib` and no code change are needed.
+
+```sh
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
+# Device:
+cargo build --release -p gb-libretro --target aarch64-apple-ios
+# Simulator (Apple Silicon host):
+cargo build --release -p gb-libretro --target aarch64-apple-ios-sim
+# -> target/<triple>/release/libgbcore_libretro.dylib
+```
+
+Then wrap the `.dylib` in a `.framework`, set its install name, and co-sign it
+before embedding — exactly as the existing Gambatte core is packaged. Build on
+macOS with the Xcode command-line tools installed (provides the iOS linker).
+
+## GameLink (link cable over the network)
+
+GameLink is wired and requires **no core configuration**. The core implements
+`RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE` (env 78) and hands the frontend a
+callback struct on `retro_load_game`. When the host starts a netplay session it
+gives the core a `send`/`receive` pair, which the core bridges straight to the
+Game Boy serial engine using the same 2-byte protocol as the local/TCP
+transports. A host that ignores env 78 simply gets a normal single-player core.
+This replaces the old gambatte link path; the netpacket transport is the one
+Trophy Hub drives on every platform.
 
 ## License
 
