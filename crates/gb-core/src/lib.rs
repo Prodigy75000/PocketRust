@@ -175,6 +175,14 @@ impl GameBoy {
         self.mmu.cartridge.restore_rtc_from_footer();
     }
 
+    /// Decode the MBC3 RTC from the battery-RAM footer. A libretro frontend fills
+    /// `sram()` in place via RETRO_MEMORY_SAVE_RAM (bypassing [`load_sram`]), so
+    /// it must call this once after loading the save file to bring the clock back.
+    /// A no-op for carts without an RTC or without a footer present.
+    pub fn restore_rtc(&mut self) {
+        self.mmu.cartridge.restore_rtc_from_footer();
+    }
+
     /// Read a byte from the bus without side effects worth worrying about.
     /// Used by the test harness to read Blargg's in-memory result protocol.
     pub fn peek(&self, addr: u16) -> u8 {

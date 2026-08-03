@@ -97,6 +97,9 @@ struct State {
     gb: Option<GameBoy>,
     rom: Vec<u8>, // kept so retro_reset can rebuild the machine
     frame: Vec<u32>, // XRGB8888, SCREEN_W*SCREEN_H
+    /// Set on load; on the next frame we decode the MBC3 RTC out of the SAVE_RAM
+    /// buffer the frontend has filled by then (it bypasses `load_sram`).
+    restore_rtc: bool,
     env: retro_environment_t,
     video: retro_video_refresh_t,
     audio_batch: retro_audio_sample_batch_t,
@@ -110,6 +113,7 @@ impl State {
             gb: None,
             rom: Vec::new(),
             frame: Vec::new(),
+            restore_rtc: false,
             env: None,
             video: None,
             audio_batch: None,
@@ -311,6 +315,9 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
         // host that exposes the option overrides this in refresh_variables.
         gb.set_colorization(Colorize::Auto);
         s.gb = Some(gb);
+        // The frontend loads the .srm into SAVE_RAM after this returns; decode the
+        // RTC footer out of it on the first frame (see `restore_rtc` in retro_run).
+        s.restore_rtc = true;
         refresh_variables(s); // apply the host's colorize option, if any
     });
     true
@@ -355,6 +362,15 @@ pub extern "C" fn retro_run() {
     }
 
     with_state(|s| {
+        // First frame after a load: the frontend has now filled SAVE_RAM, so pull
+        // the MBC3 real-time clock back out of its battery footer.
+        if s.restore_rtc {
+            if let Some(gb) = &mut s.gb {
+                gb.restore_rtc();
+            }
+            s.restore_rtc = false;
+        }
+
         // Pick up any live change to the colorize option.
         if let Some(env) = s.env {
             let mut updated = false;
@@ -472,7 +488,14 @@ pub unsafe extern "C" fn retro_unserialize(data: *const c_void, size: usize) -> 
             return false;
         }
         let slice = std::slice::from_raw_parts(data as *const u8, size);
-        gb.load_state(slice)
+        let ok = gb.load_state(slice);
+        if ok {
+            // A save state restores the RTC (and the RAM footer) itself, so a
+            // resume-on-launch must not have the pending footer decode overwrite
+            // it on the next frame.
+            s.restore_rtc = false;
+        }
+        ok
     })
 }
 #[no_mangle]
