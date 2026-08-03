@@ -39,6 +39,8 @@ pub enum MbcKind {
     Mbc2,
     Mbc3,
     Mbc5,
+    Huc1,
+    Huc3,
     Unsupported(u8),
 }
 
@@ -60,6 +62,8 @@ impl Header {
             0x06 => (MbcKind::Mbc2, true),
             0x0F..=0x13 => (MbcKind::Mbc3, matches!(cart_type, 0x0F | 0x10 | 0x13)),
             0x19..=0x1E => (MbcKind::Mbc5, matches!(cart_type, 0x1B | 0x1E)),
+            0xFE => (MbcKind::Huc3, true), // HuC3: RAM + RTC + battery
+            0xFF => (MbcKind::Huc1, true), // HuC1: RAM + battery (+ IR)
             other => (MbcKind::Unsupported(other), false),
         };
         // Cart types 0x0F (MBC3+TIMER+BATTERY) and 0x10 (MBC3+TIMER+RAM+BATTERY)
@@ -137,6 +141,17 @@ enum Mbc {
         ram_enabled: bool,
         rom_bank: u16, // 9 bits
         ram_bank: u8,  // 4 bits
+    },
+    Huc1 {
+        /// true = the 0xA000 window is the IR port; false = cartridge RAM.
+        ir_mode: bool,
+        rom_bank: u8, // 6 bits
+        ram_bank: u8, // 2 bits
+    },
+    Huc3 {
+        rom_bank: u8, // 7 bits
+        ram_bank: u8, // 4 bits
+        huc3: Huc3,   // mode register + RTC/config command MCU
     },
 }
 
@@ -329,6 +344,154 @@ impl Rtc {
     }
 }
 
+/// Wall-clock T-cycles per real minute (the HuC3 clock is minute-resolution).
+const CYCLES_PER_MINUTE: u32 = 60 * CYCLES_PER_SECOND;
+
+/// The HuC3 (Hudson) register + real-time-clock controller.
+///
+/// A write to 0x0000-0x1FFF selects what the 0xA000-0xBFFF window maps to (low
+/// nibble): 0x0A = cartridge RAM, 0x0B = write the command mailbox, 0x0C = read
+/// the mailbox result, 0x0D = the command semaphore, 0x0E = the IR port. The
+/// mailbox is a nibble interface to an MCU that holds the clock: the game writes
+/// a command (bits 6-4) + argument (bits 3-0), then requests execution by
+/// clearing bit 0 in mode 0x0D. Like the MBC3 RTC this clock is deterministic
+/// (cycle-driven), and the hardware exposes it at minute resolution.
+struct Huc3 {
+    /// 0xA000 window mode: the low nibble of the last 0x0000-0x1FFF write.
+    mode: u8,
+    command: u8, // last command, bits 2-0 of the mailbox command field
+    arg: u8,     // last argument nibble
+    result: u8,  // result nibble of the last executed command
+    addr: u8,    // register address pointer for read/write commands
+    scratch: [u8; 8], // read/write scratch registers 0x00-0x07 (one nibble each)
+    minutes: u16, // minutes since day start, 0..1439
+    days: u16,    // day counter, 0..4095
+    sub: u32,     // sub-minute accumulator, in wall-clock T-cycles
+}
+
+impl Huc3 {
+    fn new() -> Huc3 {
+        Huc3 {
+            mode: 0,
+            command: 0,
+            arg: 0,
+            result: 0,
+            addr: 0,
+            scratch: [0; 8],
+            minutes: 0,
+            days: 0,
+            sub: 0,
+        }
+    }
+
+    fn tick(&mut self, cycles: u32) {
+        self.sub += cycles;
+        while self.sub >= CYCLES_PER_MINUTE {
+            self.sub -= CYCLES_PER_MINUTE;
+            self.minutes += 1;
+            if self.minutes >= 1440 {
+                self.minutes = 0;
+                self.days = (self.days + 1) & 0x0FFF;
+            }
+        }
+    }
+
+    /// Read the MCU register at `addr` (scratch 0x00-0x07 or the live clock
+    /// nibbles 0x10-0x15).
+    fn read_reg(&self, addr: u8) -> u8 {
+        match addr {
+            0x00..=0x07 => self.scratch[addr as usize],
+            0x10 => (self.minutes & 0xF) as u8,
+            0x11 => ((self.minutes >> 4) & 0xF) as u8,
+            0x12 => ((self.minutes >> 8) & 0xF) as u8,
+            0x13 => (self.days & 0xF) as u8,
+            0x14 => ((self.days >> 4) & 0xF) as u8,
+            0x15 => ((self.days >> 8) & 0xF) as u8,
+            _ => 0,
+        }
+    }
+
+    /// Execute the mailbox command (triggered by clearing the mode-0x0D bit 0).
+    fn execute(&mut self) {
+        match self.command {
+            1 => {
+                // Read register at the pointer, then auto-increment.
+                self.result = self.read_reg(self.addr) & 0x0F;
+                self.addr = self.addr.wrapping_add(1);
+            }
+            3 => {
+                // Write the argument to the pointer, then auto-increment.
+                if (self.addr as usize) < self.scratch.len() {
+                    self.scratch[self.addr as usize] = self.arg & 0x0F;
+                }
+                self.result = self.arg;
+                self.addr = self.addr.wrapping_add(1);
+            }
+            4 => {
+                self.addr = (self.addr & 0xF0) | self.arg;
+                self.result = self.arg;
+            }
+            5 => {
+                self.addr = (self.addr & 0x0F) | (self.arg << 4);
+                self.result = self.arg;
+            }
+            6 => self.extended(self.arg),
+            _ => {}
+        }
+    }
+
+    fn extended(&mut self, cmd: u8) {
+        match cmd {
+            0 => {
+                // Atomically latch the live clock into the scratch registers.
+                self.scratch[0] = (self.minutes & 0xF) as u8;
+                self.scratch[1] = ((self.minutes >> 4) & 0xF) as u8;
+                self.scratch[2] = ((self.minutes >> 8) & 0xF) as u8;
+                self.scratch[3] = (self.days & 0xF) as u8;
+                self.scratch[4] = ((self.days >> 4) & 0xF) as u8;
+                self.scratch[5] = ((self.days >> 8) & 0xF) as u8;
+            }
+            1 => {
+                // Atomically commit the scratch registers back into the clock.
+                self.minutes = (self.scratch[0] as u16)
+                    | ((self.scratch[1] as u16) << 4)
+                    | ((self.scratch[2] as u16) << 8);
+                if self.minutes >= 1440 {
+                    self.minutes = 1439;
+                }
+                self.days = ((self.scratch[3] as u16)
+                    | ((self.scratch[4] as u16) << 4)
+                    | ((self.scratch[5] as u16) << 8))
+                    & 0x0FFF;
+            }
+            _ => {}
+        }
+        self.result = 1; // report success / ready
+    }
+
+    /// The value read back from the 0xA000 window in a non-RAM mode.
+    fn read_window(&self) -> u8 {
+        match self.mode {
+            0x0B | 0x0C => 0x80 | (self.command << 4) | self.result,
+            0x0D => 0x80 | (self.command << 4) | 0x01, // semaphore: always ready
+            0x0E => 0x00,                              // IR: no signal
+            _ => 0xFF,
+        }
+    }
+
+    fn transfer<C: crate::save::Cursor>(&mut self, c: &mut C) {
+        c.u8(&mut self.mode);
+        c.u8(&mut self.command);
+        c.u8(&mut self.arg);
+        c.u8(&mut self.result);
+        c.u8(&mut self.addr);
+        c.bytes(&mut self.scratch);
+        c.u16(&mut self.minutes);
+        c.u16(&mut self.days);
+        c.u32(&mut self.sub);
+    }
+}
+
 impl Cartridge {
     pub fn new(rom: Vec<u8>) -> Cartridge {
         let header = Header::parse(&rom);
@@ -365,6 +528,16 @@ impl Cartridge {
                 ram_enabled: false,
                 rom_bank: 1,
                 ram_bank: 0,
+            },
+            MbcKind::Huc1 => Mbc::Huc1 {
+                ir_mode: false,
+                rom_bank: 1,
+                ram_bank: 0,
+            },
+            MbcKind::Huc3 => Mbc::Huc3 {
+                rom_bank: 1,
+                ram_bank: 0,
+                huc3: Huc3::new(),
             },
             MbcKind::Unsupported(_) => Mbc::None,
         };
@@ -432,6 +605,16 @@ impl Cartridge {
                 let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
                 *self.rom.get(offset).unwrap_or(&0xFF)
             }
+            // HuC1 and HuC3 bank like an MBC1/MBC3 (bank 0 not selectable high).
+            Mbc::Huc1 { rom_bank, .. } | Mbc::Huc3 { rom_bank, .. } => {
+                let bank = if addr < 0x4000 {
+                    0
+                } else {
+                    ((*rom_bank as usize).max(1)) & (self.header.rom_banks - 1)
+                };
+                let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
+                *self.rom.get(offset).unwrap_or(&0xFF)
+            }
         }
     }
 
@@ -493,6 +676,26 @@ impl Cartridge {
                 0x4000..=0x5FFF => *ram_bank = val & 0x0F,
                 _ => {}
             },
+            Mbc::Huc1 {
+                ir_mode,
+                rom_bank,
+                ram_bank,
+            } => match addr {
+                0x0000..=0x1FFF => *ir_mode = (val & 0x0F) == 0x0E,
+                0x2000..=0x3FFF => *rom_bank = val & 0x3F,
+                0x4000..=0x5FFF => *ram_bank = val & 0x03,
+                _ => {}
+            },
+            Mbc::Huc3 {
+                rom_bank,
+                ram_bank,
+                huc3,
+            } => match addr {
+                0x0000..=0x1FFF => huc3.mode = val & 0x0F,
+                0x2000..=0x3FFF => *rom_bank = val & 0x7F,
+                0x4000..=0x5FFF => *ram_bank = val & 0x0F,
+                _ => {}
+            },
         }
     }
 
@@ -504,11 +707,28 @@ impl Cartridge {
             | Mbc::Mbc2 { ram_enabled, .. }
             | Mbc::Mbc3 { ram_enabled, .. }
             | Mbc::Mbc5 { ram_enabled, .. } => *ram_enabled,
+            // HuC1 RAM is reachable whenever the window isn't in IR mode.
+            Mbc::Huc1 { ir_mode, .. } => !*ir_mode,
+            // HuC3 RAM is reachable in mode 0x0A (handled before this gate).
+            Mbc::Huc3 { huc3, .. } => huc3.mode == 0x0A,
         }
     }
 
     /// Read from cartridge RAM (0xA000..=0xBFFF).
     pub fn read_ram(&self, addr: u16) -> u8 {
+        // HuC1: the IR window reads back "no signal"; otherwise it is RAM.
+        if let Mbc::Huc1 { ir_mode: true, .. } = &self.mbc {
+            return 0xC0;
+        }
+        // HuC3: a non-RAM window returns the command mailbox / semaphore / IR.
+        if let Mbc::Huc3 { huc3, ram_bank, .. } = &self.mbc {
+            if huc3.mode != 0x00 && huc3.mode != 0x0A {
+                return huc3.read_window();
+            }
+            let banks = self.header.ram_banks.max(1);
+            let idx = (*ram_bank as usize % banks) * 0x2000 + (addr as usize & 0x1FFF);
+            return self.ram.get(idx).copied().unwrap_or(0xFF);
+        }
         if !self.ram_enabled() {
             return 0xFF;
         }
@@ -536,6 +756,18 @@ impl Cartridge {
 
     /// Write to cartridge RAM (0xA000..=0xBFFF).
     pub fn write_ram(&mut self, addr: u16, val: u8) {
+        // HuC1: an IR-mode write drives the LED (ignored); RAM otherwise.
+        if let Mbc::Huc1 { ir_mode, .. } = &self.mbc {
+            if *ir_mode {
+                return;
+            }
+            // fall through to the generic RAM write below
+        }
+        // HuC3: RAM in mode 0x0A, else the command-mailbox / semaphore interface.
+        if matches!(self.mbc, Mbc::Huc3 { .. }) {
+            self.huc3_write(addr, val);
+            return;
+        }
         if !self.ram_enabled() {
             return;
         }
@@ -592,11 +824,46 @@ impl Cartridge {
             }
             Mbc::Mbc3 { ram_bank, .. } => (*ram_bank & 0x03) as usize,
             Mbc::Mbc5 { ram_bank, .. } => *ram_bank as usize,
+            Mbc::Huc1 { ram_bank, .. } => (*ram_bank & 0x03) as usize,
+            Mbc::Huc3 { ram_bank, .. } => (*ram_bank & 0x0F) as usize,
             Mbc::None | Mbc::Mbc2 { .. } => 0, // MBC2 handled above
         };
         // Guard against carts that report no RAM banks.
         let banks = self.header.ram_banks.max(1);
         (bank % banks) * 0x2000 + local
+    }
+
+    /// HuC3 write to the 0xA000-0xBFFF window: cartridge RAM in mode 0x0A, else
+    /// the command-mailbox (0x0B) / semaphore-commit (0x0D) interface.
+    fn huc3_write(&mut self, addr: u16, val: u8) {
+        let (mode, bank) = match &self.mbc {
+            Mbc::Huc3 { huc3, ram_bank, .. } => (huc3.mode, *ram_bank as usize),
+            _ => return,
+        };
+        match mode {
+            0x0A => {
+                let banks = self.header.ram_banks.max(1);
+                let idx = (bank % banks) * 0x2000 + (addr as usize & 0x1FFF);
+                if let Some(cell) = self.ram.get_mut(idx) {
+                    *cell = val;
+                }
+            }
+            0x0B => {
+                if let Mbc::Huc3 { huc3, .. } = &mut self.mbc {
+                    huc3.command = (val >> 4) & 0x07;
+                    huc3.arg = val & 0x0F;
+                }
+            }
+            0x0D => {
+                // Clearing bit 0 requests execution of the mailbox command.
+                if val & 0x01 == 0 {
+                    if let Mbc::Huc3 { huc3, .. } = &mut self.mbc {
+                        huc3.execute();
+                    }
+                }
+            }
+            _ => {} // IR (0x0E) LED and read-only modes: nothing to write
+        }
     }
 
     pub fn title(&self) -> &str {
@@ -651,24 +918,47 @@ impl Cartridge {
                 c.u16(rom_bank);
                 c.u8(ram_bank);
             }
+            Mbc::Huc1 {
+                ir_mode,
+                rom_bank,
+                ram_bank,
+            } => {
+                c.bool(ir_mode);
+                c.u8(rom_bank);
+                c.u8(ram_bank);
+            }
+            Mbc::Huc3 {
+                rom_bank,
+                ram_bank,
+                huc3,
+            } => {
+                c.u8(rom_bank);
+                c.u8(ram_bank);
+                huc3.transfer(c);
+            }
         }
     }
 
-    /// Advance the MBC3 real-time clock by `cycles` wall-clock T-cycles. A no-op
-    /// for every other cartridge. The MMU calls this each tick with the
-    /// double-speed-adjusted cycle count so the clock always tracks real time.
+    /// Advance the on-cartridge real-time clock (MBC3 or HuC3) by `cycles`
+    /// wall-clock T-cycles. A no-op for every other cartridge. The MMU calls this
+    /// each tick with the double-speed-adjusted cycle count so the clock always
+    /// tracks real time.
     pub fn tick_rtc(&mut self, cycles: u32) {
-        let footer = if let Mbc::Mbc3 {
-            has_rtc: true, rtc, ..
-        } = &mut self.mbc
-        {
-            if rtc.tick(cycles) {
-                Some(rtc.encode_footer())
-            } else {
+        let footer = match &mut self.mbc {
+            Mbc::Mbc3 {
+                has_rtc: true, rtc, ..
+            } => {
+                if rtc.tick(cycles) {
+                    Some(rtc.encode_footer())
+                } else {
+                    None
+                }
+            }
+            Mbc::Huc3 { huc3, .. } => {
+                huc3.tick(cycles);
                 None
             }
-        } else {
-            None
+            _ => None,
         };
         if let Some(footer) = footer {
             self.write_rtc_footer(&footer);
@@ -877,5 +1167,103 @@ mod tests {
         cart.write_rom(0x0000, 0x0A);
         latch(&mut cart);
         assert_eq!(read_rtc(&mut cart, 0x08), 0);
+    }
+
+    // --- HuC1 / HuC3 --------------------------------------------------------
+
+    fn huc_cart(cart_type: u8) -> Cartridge {
+        let mut rom = vec![0u8; 0x10000]; // 4 ROM banks so a bank switch is real
+        rom[0x0147] = cart_type;
+        rom[0x0148] = 0x01; // 64 KiB (4 banks)
+        rom[0x0149] = 0x03; // 32 KiB RAM (4 banks)
+                            // Stamp each 16 KiB bank so we can tell which is mapped at 0x4000.
+        for b in 0..4 {
+            rom[b * 0x4000] = b as u8;
+        }
+        Cartridge::new(rom)
+    }
+
+    #[test]
+    fn huc1_detected_and_banks_rom() {
+        let mut cart = huc_cart(0xFF);
+        assert_eq!(cart.header.mbc_kind, MbcKind::Huc1);
+        assert!(cart.header.has_battery);
+        cart.write_rom(0x2000, 0x02); // select ROM bank 2
+        assert_eq!(cart.read_rom(0x4000), 2, "bank 2 stamp at 0x4000");
+        cart.write_rom(0x2000, 0x00); // bank 0 is promoted to 1 in the high slot
+        assert_eq!(cart.read_rom(0x4000), 1);
+        assert_eq!(cart.read_rom(0x0000), 0, "low slot is always bank 0");
+    }
+
+    #[test]
+    fn huc1_ram_and_ir_window() {
+        let mut cart = huc_cart(0xFF);
+        // RAM mode (any non-0x0E write): read/write cartridge RAM.
+        cart.write_rom(0x0000, 0x00);
+        cart.write_ram(0xA000, 0x5A);
+        assert_eq!(cart.read_ram(0xA000), 0x5A);
+        // IR mode: the window reads "no signal" and swallows writes.
+        cart.write_rom(0x0000, 0x0E);
+        assert_eq!(cart.read_ram(0xA000), 0xC0);
+        cart.write_ram(0xA000, 0x11); // ignored
+        cart.write_rom(0x0000, 0x00); // back to RAM
+        assert_eq!(cart.read_ram(0xA000), 0x5A, "RAM survived the IR window");
+    }
+
+    #[test]
+    fn huc3_detected_and_ram() {
+        let mut cart = huc_cart(0xFE);
+        assert_eq!(cart.header.mbc_kind, MbcKind::Huc3);
+        assert!(cart.header.has_battery);
+        cart.write_rom(0x0000, 0x0A); // mode 0x0A = RAM
+        cart.write_ram(0xA000, 0x42);
+        assert_eq!(cart.read_ram(0xA000), 0x42);
+    }
+
+    /// Drive the HuC3 nibble command MCU to set an address pointer, then execute.
+    fn huc3_exec(cart: &mut Cartridge, byte: u8) {
+        cart.write_rom(0x0000, 0x0B); // command-write mode
+        cart.write_ram(0xA000, byte); // load the mailbox
+        cart.write_rom(0x0000, 0x0D); // semaphore mode
+        cart.write_ram(0xA000, 0x00); // clear bit 0 -> execute
+    }
+
+    #[test]
+    fn huc3_rtc_reads_running_clock() {
+        let mut cart = huc_cart(0xFE);
+        // Advance the clock 3 minutes.
+        cart.tick_rtc(3 * CYCLES_PER_MINUTE);
+        // Latch RTC -> scratch (extended command 0x60), then read scratch nibbles.
+        huc3_exec(&mut cart, 0x60); // 6<<4 | 0 : copy RTC to scratch
+        huc3_exec(&mut cart, 0x40); // set address low nibble = 0
+        huc3_exec(&mut cart, 0x50); // set address high nibble = 0
+        // Read three minute nibbles (auto-incrementing pointer) and reassemble.
+        let mut minutes = 0u16;
+        for shift in [0u8, 4, 8] {
+            huc3_exec(&mut cart, 0x10); // read register at pointer, auto-inc
+            cart.write_rom(0x0000, 0x0C); // result-read mode
+            let nib = (cart.read_ram(0xA000) & 0x0F) as u16;
+            minutes |= nib << shift;
+        }
+        assert_eq!(minutes, 3, "HuC3 clock should read 3 minutes");
+    }
+
+    #[test]
+    fn huc3_rtc_survives_save_state() {
+        let mut cart = huc_cart(0xFE);
+        cart.tick_rtc(5 * CYCLES_PER_MINUTE);
+        let mut w = crate::save::WriteCursor::new();
+        cart.transfer(&mut w);
+
+        let mut cart2 = huc_cart(0xFE);
+        let mut r = crate::save::ReadCursor::new(&w.buf);
+        cart2.transfer(&mut r);
+        assert!(r.ok);
+        huc3_exec(&mut cart2, 0x60);
+        huc3_exec(&mut cart2, 0x40);
+        huc3_exec(&mut cart2, 0x50);
+        huc3_exec(&mut cart2, 0x10);
+        cart2.write_rom(0x0000, 0x0C);
+        assert_eq!(cart2.read_ram(0xA000) & 0x0F, 5, "minutes low nibble restored");
     }
 }

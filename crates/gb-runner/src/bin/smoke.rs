@@ -18,7 +18,7 @@ const FRAMES: u32 = 900; // ~15s at 60 fps (some intros are slow, e.g. Pokemon)
 
 /// Mirror cartridge.rs: the MBC types the core actually maps to a real mapper.
 fn core_supports_mbc(t: u8) -> bool {
-    matches!(t, 0x00 | 0x01 | 0x02 | 0x03 | 0x05 | 0x06 | 0x0F..=0x13 | 0x19..=0x1E)
+    matches!(t, 0x00 | 0x01 | 0x02 | 0x03 | 0x05 | 0x06 | 0x0F..=0x13 | 0x19..=0x1E | 0xFE | 0xFF)
 }
 
 fn mbc_name(t: u8) -> &'static str {
