@@ -14,6 +14,7 @@ mod colorize;
 mod cpu;
 mod gbc_palettes;
 mod joypad;
+mod link;
 mod mmu;
 mod ppu;
 mod save;
@@ -21,6 +22,7 @@ mod serial;
 mod sgb;
 mod timer;
 
+pub use link::{packet_len, LinkProto, PROTOCOL_VERSION, TAG_CLOCK, TAG_OUTPUT, TAG_REPLY};
 pub use serial::{local_pair, LinkCable, LocalLink};
 
 use save::{ReadCursor, WriteCursor};
