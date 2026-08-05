@@ -192,6 +192,31 @@ pub unsafe extern "C" fn retro_get_system_av_info(info: *mut retro_system_av_inf
 #[no_mangle]
 pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
     with_state(|s| s.env = cb);
+
+    // Offer the link-cable (netpacket) interface here, NOT from retro_load_game.
+    //
+    // A host that has to defer wiring the callbacks — because a core's netplay
+    // state isn't built until retro_init — flushes that deferral straight after
+    // retro_init returns. Announcing at load time means the flush point is
+    // already behind us, so the host arms a kickstart that nothing ever fires:
+    // the session comes up (ICE connected, bridge bound, link pill shown) while
+    // the core's send_fn stays null and not one link byte moves. On device that
+    // read as the Cable Club attendant refusing a pair that looked connected,
+    // and only on the FIRST GB game after an app start — a warm app was masked
+    // by the previous game's env-78 already sitting in the host's slot.
+    //
+    // retro_set_environment runs before retro_init on every load path, which is
+    // where the host expects this and where its deferral logic works. CALLBACK
+    // is a static, so there is nothing here that needs a loaded game.
+    if let Some(env) = cb {
+        unsafe {
+            env(
+                netpacket::RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE,
+                &netpacket::CALLBACK as *const _ as *mut c_void,
+            );
+        }
+    }
+
     // Advertise our core options to the front-end.
     if let Some(env) = cb {
         let vars = [
@@ -298,15 +323,6 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
                 &mut fmt as *mut i32 as *mut c_void,
             );
         }
-        // Offer the link-cable (netpacket) interface so the host can wire us
-        // into its LAN netplay for GameLink. Harmless if the host ignores it.
-        if let Some(env) = s.env {
-            env(
-                netpacket::RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE,
-                &netpacket::CALLBACK as *const _ as *mut c_void,
-            );
-        }
-
         s.rom = rom.clone();
         let mut gb = GameBoy::new(rom);
         // Default to authentic per-game GBC colorization so DMG games look right
