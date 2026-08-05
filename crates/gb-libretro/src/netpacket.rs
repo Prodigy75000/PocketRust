@@ -29,6 +29,11 @@ const RETRO_NETPACKET_BROADCAST: u16 = 0xFFFF;
 /// that a dead peer degrades to the game's own link-error path instead of an ANR.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Re-send an unanswered clock this often. A LAN round trip is well under a
+/// millisecond and a WAN one is tens, so 20 ms only fires when a packet really
+/// was lost, and still allows ~25 attempts inside EXCHANGE_TIMEOUT.
+const RETRANSMIT_AFTER: Duration = Duration::from_millis(20);
+
 /// Yield this many times before backing off to a real sleep, so a healthy
 /// exchange never pays for a timer but a stuck one never pins a core.
 const HOT_SPINS: u32 = 2_000;
@@ -70,9 +75,13 @@ unsafe impl Sync for RetroNetpacketCallback {}
 
 /// v1 had no request/response pairing, so a master could not tell the slave's
 /// pre-transfer SB from an echo of its own byte; v2 added it; v3 carries the
-/// responder's backlog so the UI can name who is holding up the cable. A peer
-/// on an older version must refuse the session rather than corrupt a trade.
-static PROTOCOL: &[u8] = b"pocketrust-link-3\0";
+/// responder's backlog; v4 makes an exchange idempotent so a lost datagram can
+/// simply be re-sent, which LAN needs because nothing beneath us retransmits.
+///
+/// The v4 bump matters: a v3 responder queues the byte a second time when a
+/// clock is retransmitted, silently shifting every later byte of a trade by one.
+/// A peer on an older version must refuse the session rather than corrupt it.
+static PROTOCOL: &[u8] = b"pocketrust-link-4\0";
 
 /// The callback struct handed to the frontend via env 78.
 pub static CALLBACK: RetroNetpacketCallback = RetroNetpacketCallback {
@@ -206,6 +215,7 @@ impl LinkCable for NetpacketLink {
         flush_outbox();
 
         let deadline = Instant::now() + EXCHANGE_TIMEOUT;
+        let mut next_retry = Instant::now() + RETRANSMIT_AFTER;
         let mut spins: u32 = 0;
         loop {
             // Short borrow / poll / short borrow — see the SAFETY note on with_net.
@@ -216,8 +226,20 @@ impl LinkCable for NetpacketLink {
             if !with_net(|n| n.active) {
                 break; // session torn down under us
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 break;
+            }
+            // Nothing beneath us retransmits: the host's send_fn ignores
+            // RETRO_NETPACKET_RELIABLE and calls sendto directly. On the WAN
+            // path the bridge's reliable WebRTC channel hid that; on a LAN a
+            // single lost datagram would otherwise cost the full timeout and
+            // hand the ROM open bus mid-trade. The responder answers duplicates
+            // from cache, so re-sending is free of side effects.
+            if now >= next_retry {
+                with_net(|n| n.proto.retry_exchange());
+                flush_outbox();
+                next_retry = now + RETRANSMIT_AFTER;
             }
             // A healthy reply lands within one network round trip, so spin hot
             // at first. Past that the link is in trouble and we are heading for

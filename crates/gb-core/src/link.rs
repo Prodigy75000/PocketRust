@@ -14,9 +14,10 @@
 use std::collections::VecDeque;
 
 /// Wire-format version. v1 had no pairing; v2 added it; v3 carries the
-/// responder's backlog in the reply so each side can tell the user who is
-/// actually holding up the cable.
-pub const PROTOCOL_VERSION: &str = "pocketrust-link-3";
+/// responder's backlog in the reply; v4 makes an exchange idempotent so a lost
+/// datagram can simply be re-sent — required for LAN, where nothing beneath the
+/// protocol retransmits.
+pub const PROTOCOL_VERSION: &str = "pocketrust-link-4";
 
 /// `[0, b]` — "my SB is now `b`". Kept from v1: a slave must announce the byte
 /// it presents, because the peer's transport answers clocks on its behalf.
@@ -41,6 +42,11 @@ pub const TAG_REPLY: u8 = 3;
 /// telling each player who is holding up the cable.
 pub const TAG_GAVE_UP: u8 = 4;
 
+/// How many recently-answered sequence numbers to remember for duplicate
+/// suppression. Only one exchange is ever outstanding, so anything beyond a
+/// couple is slack; eight costs nothing and covers a run of lost clocks.
+const SEEN_WINDOW: usize = 8;
+
 /// Backlog reported as healthy. The byte being answered right now is always in
 /// the queue, so a game keeping up reports 0.
 pub const LAG_HEALTHY: u8 = 0;
@@ -59,6 +65,16 @@ pub struct LinkProto {
     next_seq: u8,
     /// The exchange we are waiting on a reply for, if any.
     awaiting: Option<u8>,
+    /// The byte being clocked in `awaiting`, kept so a lost clock can be re-sent.
+    pending_out: u8,
+    /// Sequence numbers we have already answered, so a retransmitted clock is
+    /// idempotent. A ring rather than a single slot: a clock can be lost
+    /// outright, which advances the master's counter past a value we never saw.
+    seen: [Option<u8>; SEEN_WINDOW],
+    seen_pos: usize,
+    /// The exact reply we sent for the most recent new clock, replayed verbatim
+    /// if that clock arrives again.
+    last_reply: [u8; 4],
     /// The reply that matched `awaiting`.
     reply: Option<u8>,
     /// Bytes a master clocked into us, awaiting pickup by the serial engine.
@@ -84,6 +100,10 @@ impl LinkProto {
             own_output: 0xFF,
             next_seq: 0,
             awaiting: None,
+            pending_out: 0xFF,
+            seen: [None; SEEN_WINDOW],
+            seen_pos: 0,
+            last_reply: [0; 4],
             reply: None,
             slave_input: VecDeque::new(),
             peer_lag: LAG_HEALTHY,
@@ -97,6 +117,10 @@ impl LinkProto {
         self.own_output = 0xFF;
         self.next_seq = 0;
         self.awaiting = None;
+        self.pending_out = 0xFF;
+        self.seen = [None; SEEN_WINDOW];
+        self.seen_pos = 0;
+        self.last_reply = [0; 4];
         self.reply = None;
         self.slave_input.clear();
         self.peer_lag = LAG_HEALTHY;
@@ -132,9 +156,34 @@ impl LinkProto {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         self.awaiting = Some(seq);
+        self.pending_out = out;
         self.reply = None;
         self.outbox.push_back([TAG_CLOCK, seq, out, 0]);
         seq
+    }
+
+    /// Re-send the clock for the exchange still being awaited.
+    ///
+    /// LAN netplay is bare UDP — the host's `send_fn` ignores
+    /// `RETRO_NETPACKET_RELIABLE` and calls `sendto` — so nothing beneath us
+    /// retransmits. The WAN path was insulated by the reliable, ordered WebRTC
+    /// channel the bridge relays over; on a LAN a single lost datagram would
+    /// otherwise burn the master's whole timeout and hand the ROM open bus in
+    /// the middle of a trade. Safe to call as often as the transport likes: the
+    /// responder answers a duplicate from cache and never re-queues the byte.
+    pub fn retry_exchange(&mut self) {
+        if let Some(seq) = self.awaiting {
+            self.outbox.push_back([TAG_CLOCK, seq, self.pending_out, 0]);
+        }
+    }
+
+    fn is_new_clock(&self, seq: u8) -> bool {
+        !self.seen.contains(&Some(seq))
+    }
+
+    fn mark_seen(&mut self, seq: u8) {
+        self.seen[self.seen_pos] = Some(seq);
+        self.seen_pos = (self.seen_pos + 1) % SEEN_WINDOW;
     }
 
     /// Take the peer's reply for `seq`, if it has arrived.
@@ -175,12 +224,24 @@ impl LinkProto {
             Some(TAG_OUTPUT) if pkt.len() >= 2 => self.own_peer_presents(pkt[1]),
             Some(TAG_CLOCK) if pkt.len() >= 3 => {
                 let (seq, byte) = (pkt[1], pkt[2]);
-                // Reply with the byte we are presenting *right now*, before the
-                // serial engine picks the clocked byte up and overwrites SB.
-                let sb = self.own_output;
-                self.slave_input.push_back(byte);
-                let lag = self.lag();
-                self.outbox.push_back([TAG_REPLY, seq, sb, lag]);
+                if self.is_new_clock(seq) {
+                    self.mark_seen(seq);
+                    // Reply with the byte we are presenting *right now*, before
+                    // the serial engine picks the clocked byte up and overwrites
+                    // SB — and cache it, because by the time a retransmit lands
+                    // the game may have consumed the byte and presented another.
+                    let sb = self.own_output;
+                    self.slave_input.push_back(byte);
+                    self.last_reply = [TAG_REPLY, seq, sb, self.lag()];
+                }
+                if self.last_reply[0] == TAG_REPLY && self.last_reply[1] == seq {
+                    self.outbox.push_back(self.last_reply);
+                } else {
+                    // A duplicate older than the cache holds. Answer it so the
+                    // peer isn't left waiting — the master drops any reply whose
+                    // seq it isn't awaiting — but never re-queue the byte.
+                    self.outbox.push_back([TAG_REPLY, seq, self.own_output, self.lag()]);
+                }
             }
             Some(TAG_REPLY) if pkt.len() >= 3 => {
                 let (seq, byte) = (pkt[1], pkt[2]);
@@ -243,10 +304,31 @@ mod tests {
     struct Wire {
         /// Packets in flight toward each side.
         inflight: [VecDeque<Vec<u8>>; 2],
+        /// Drop every Nth packet that crosses. 0 = lossless.
+        ///
+        /// LAN netplay is bare UDP: the host's `send_fn` ignores
+        /// `RETRO_NETPACKET_RELIABLE` and calls `sendto` directly. The WAN path
+        /// never exposed this because the RfuBridge relays over a reliable,
+        /// ordered WebRTC channel. A Game Boy cable cannot lose a byte, so the
+        /// protocol has to survive loss on its own.
+        drop_every: usize,
+        crossed: usize,
+        dropped: usize,
     }
 
     impl Wire {
+        fn lossy(drop_every: usize) -> Wire {
+            Wire {
+                drop_every,
+                ..Wire::default()
+            }
+        }
         fn send(&mut self, from: usize, pkt: Vec<u8>) {
+            self.crossed += 1;
+            if self.drop_every != 0 && self.crossed % self.drop_every == 0 {
+                self.dropped += 1;
+                return; // silently lost, exactly like a UDP datagram
+            }
             self.inflight[1 - from].push_back(pkt);
         }
         fn drain(&mut self, side: usize) -> Vec<Vec<u8>> {
@@ -464,8 +546,11 @@ mod tests {
 
     impl Pair {
         fn new() -> Pair {
+            Pair::lossy(0)
+        }
+        fn lossy(drop_every: usize) -> Pair {
             Pair {
-                wire: Rc::new(RefCell::new(Wire::default())),
+                wire: Rc::new(RefCell::new(Wire::lossy(drop_every))),
                 proto: [
                     Rc::new(RefCell::new(LinkProto::new())),
                     Rc::new(RefCell::new(LinkProto::new())),
@@ -552,13 +637,19 @@ mod tests {
         fn master_exchange(&mut self, out: u8) -> u8 {
             let seq = self.pair.proto[self.side].borrow_mut().begin_exchange(out);
             self.pair.flush(self.side);
-            for _ in 0..64 {
+            for attempt in 0..64 {
                 // Peer receives the clock and answers from its transport.
                 self.pair.deliver(1 - self.side);
                 self.pair.deliver(self.side);
                 let got = self.pair.proto[self.side].borrow_mut().take_reply(seq);
                 if let Some(sb) = got {
                     return sb;
+                }
+                // Nothing came back — assume the clock or the reply was lost
+                // and re-send. Mirrors the transport's retransmit timer.
+                if attempt % 4 == 3 {
+                    self.pair.proto[self.side].borrow_mut().retry_exchange();
+                    self.pair.flush(self.side);
                 }
             }
             self.pair.proto[self.side].borrow_mut().abandon(seq);
@@ -605,6 +696,89 @@ mod tests {
                 "slave must receive the master's byte (exchange {i})"
             );
         }
+    }
+
+    /// LAN is bare UDP with no retransmit anywhere beneath us, so a dropped
+    /// clock or reply must not cost a byte. Every exchange still has to land the
+    /// right value with one packet in twenty going missing.
+    #[test]
+    fn paired_exchange_survives_packet_loss() {
+        // 1-in-20 is a plausible bad LAN; 1-in-3 is far worse than anything a
+        // real network does. Both must be lossless at the byte level, because a
+        // trade has no tolerance for a single wrong byte.
+        for drop_every in [20usize, 7, 3] {
+            let pair = Pair::lossy(drop_every);
+            let mut master = Serial::new();
+            let mut slave = Serial::new();
+            master.connect(Box::new(pair.endpoint(0)));
+            slave.connect(Box::new(pair.endpoint(1)));
+
+            let got = run_v2(&pair, &mut master, &mut slave);
+            let dropped = pair.wire.borrow().dropped;
+            assert!(
+                dropped > 0,
+                "the test is worthless if nothing was actually dropped (1 in {drop_every})"
+            );
+            for (i, &(got_m, got_s)) in got.iter().enumerate() {
+                assert_eq!(
+                    got_m, SLAVE_BYTES[i],
+                    "master must receive the slave's byte despite loss \
+                     (exchange {i}, 1 in {drop_every} dropped, {dropped} lost)"
+                );
+                assert_eq!(
+                    got_s, MASTER_BYTES[i],
+                    "slave must receive the master's byte despite loss \
+                     (exchange {i}, 1 in {drop_every} dropped, {dropped} lost)"
+                );
+            }
+        }
+    }
+
+    /// A retransmitted clock must not hand the game the same byte twice. This is
+    /// the failure retransmit would otherwise introduce: the reply is lost, the
+    /// master re-sends, and a naive responder queues the byte a second time —
+    /// silently shifting every later byte in a trade by one.
+    #[test]
+    fn a_retransmitted_clock_is_not_delivered_twice() {
+        let mut p = LinkProto::new();
+        p.set_output(0x3C);
+
+        p.on_packet(&[TAG_CLOCK, 7, 0xA5]);
+        let first = p.pop_outbound().expect("first clock must be answered");
+
+        // The reply was lost; the master sends the identical clock again.
+        p.on_packet(&[TAG_CLOCK, 7, 0xA5]);
+        let again = p.pop_outbound().expect("a duplicate must still be answered");
+
+        assert_eq!(first, again, "the answer must be identical, not recomputed");
+        assert_eq!(p.poll_slave_input(), Some(0xA5));
+        assert_eq!(
+            p.poll_slave_input(),
+            None,
+            "the duplicate must not queue a second copy"
+        );
+    }
+
+    /// The cached answer must be the SB from the original exchange. If the game
+    /// has moved on and written a new SB by the time the retransmit lands,
+    /// recomputing the reply would answer a stale clock with a fresh byte.
+    #[test]
+    fn a_duplicate_is_answered_with_the_original_sb() {
+        let mut p = LinkProto::new();
+        p.set_output(0x11);
+        p.on_packet(&[TAG_CLOCK, 3, 0xAA]);
+        p.pop_outbound();
+
+        // Game consumes the byte and presents something new.
+        assert_eq!(p.poll_slave_input(), Some(0xAA));
+        p.set_output(0x99);
+
+        p.on_packet(&[TAG_CLOCK, 3, 0xAA]);
+        assert_eq!(
+            p.pop_outbound(),
+            Some([TAG_REPLY, 3, 0x11, LAG_HEALTHY]),
+            "must replay the original SB, not the byte presented since"
+        );
     }
 
     /// A reply that arrives for an exchange the master already moved past must
