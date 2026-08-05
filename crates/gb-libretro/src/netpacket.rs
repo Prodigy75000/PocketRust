@@ -68,10 +68,11 @@ pub struct RetroNetpacketCallback {
 // string). We share it as a &'static.
 unsafe impl Sync for RetroNetpacketCallback {}
 
-/// Bumped from `pocketrust-link-1`: v1 had no request/response pairing, so a
-/// master could not tell the slave's pre-transfer SB from an echo of its own
-/// byte. A peer still on v1 must refuse the session rather than corrupt a trade.
-static PROTOCOL: &[u8] = b"pocketrust-link-2\0";
+/// v1 had no request/response pairing, so a master could not tell the slave's
+/// pre-transfer SB from an echo of its own byte; v2 added it; v3 carries the
+/// responder's backlog so the UI can name who is holding up the cable. A peer
+/// on an older version must refuse the session rather than corrupt a trade.
+static PROTOCOL: &[u8] = b"pocketrust-link-3\0";
 
 /// The callback struct handed to the frontend via env 78.
 pub static CALLBACK: RetroNetpacketCallback = RetroNetpacketCallback {
@@ -246,7 +247,10 @@ impl LinkCable for NetpacketLink {
             }
         }
 
+        // The give-up packet emitted by abandon() is the diagnostic: the bridge
+        // counts it and the peer learns it was the one not answering.
         with_net(|n| n.proto.abandon(seq));
+        flush_outbox(); // abandon() only queues the give-up; it still has to go out
         0xFF // open bus: let the ROM run its own link-error path
     }
 

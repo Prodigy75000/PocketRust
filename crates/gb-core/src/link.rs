@@ -13,16 +13,37 @@
 
 use std::collections::VecDeque;
 
-/// Wire-format version. Bumped from `pocketrust-link-1`, which had no pairing.
-pub const PROTOCOL_VERSION: &str = "pocketrust-link-2";
+/// Wire-format version. v1 had no pairing; v2 added it; v3 carries the
+/// responder's backlog in the reply so each side can tell the user who is
+/// actually holding up the cable.
+pub const PROTOCOL_VERSION: &str = "pocketrust-link-3";
 
 /// `[0, b]` — "my SB is now `b`". Kept from v1: a slave must announce the byte
 /// it presents, because the peer's transport answers clocks on its behalf.
 pub const TAG_OUTPUT: u8 = 0;
 /// `[2, seq, b]` — "I am clocking `b` into you as exchange `seq`."
 pub const TAG_CLOCK: u8 = 2;
-/// `[3, seq, b]` — "for exchange `seq`, the byte I was presenting was `b`."
+/// `[3, seq, b, lag]` — "for exchange `seq` I was presenting `b`, and my game is
+/// `lag` bytes behind on picking up what you have clocked into me."
+///
+/// `lag` is the whole point of v3. A responder answers a clock from its
+/// *transport*, immediately, so byte counts alone can never show that its
+/// **game** has fallen behind — the bytes are being accepted and answered on
+/// time while the ROM sits at a menu and never reads them. `lag` is the one
+/// fact only the responder knows, so it has to be said out loud.
 pub const TAG_REPLY: u8 = 3;
+
+/// `[4, seq, 0]` — "I waited out the clock on exchange `seq` and gave up."
+///
+/// Costs one packet on a path that is already broken, and buys two things: the
+/// bridge can count give-ups without the core needing a logging channel, and the
+/// peer finds out it was the one not answering. Those are the two halves of
+/// telling each player who is holding up the cable.
+pub const TAG_GAVE_UP: u8 = 4;
+
+/// Backlog reported as healthy. The byte being answered right now is always in
+/// the queue, so a game keeping up reports 0.
+pub const LAG_HEALTHY: u8 = 0;
 
 /// The link-cable protocol state machine.
 ///
@@ -41,9 +62,14 @@ pub struct LinkProto {
     /// The reply that matched `awaiting`.
     reply: Option<u8>,
     /// Bytes a master clocked into us, awaiting pickup by the serial engine.
+    /// Its depth *is* our lag: bytes accepted that our game has not read.
     slave_input: VecDeque<u8>,
+    /// The backlog the peer reported in its most recent reply.
+    peer_lag: u8,
+    /// The peer told us it timed out waiting on one of our replies.
+    peer_gave_up: bool,
     /// Packets for the transport to send.
-    outbox: VecDeque<[u8; 3]>,
+    outbox: VecDeque<[u8; 4]>,
 }
 
 impl Default for LinkProto {
@@ -60,6 +86,8 @@ impl LinkProto {
             awaiting: None,
             reply: None,
             slave_input: VecDeque::new(),
+            peer_lag: LAG_HEALTHY,
+            peer_gave_up: false,
             outbox: VecDeque::new(),
         }
     }
@@ -71,7 +99,20 @@ impl LinkProto {
         self.awaiting = None;
         self.reply = None;
         self.slave_input.clear();
+        self.peer_lag = LAG_HEALTHY;
+        self.peer_gave_up = false;
         self.outbox.clear();
+    }
+
+    /// How many clocked bytes our game has not picked up yet, beyond the one
+    /// currently being answered. 0 while the ROM keeps up.
+    pub fn lag(&self) -> u8 {
+        self.slave_input.len().saturating_sub(1).min(255) as u8
+    }
+
+    /// The backlog the peer reported in its last reply. 0 while it keeps up.
+    pub fn peer_lag(&self) -> u8 {
+        self.peer_lag
     }
 
     /// Present `byte` as this side's SB.
@@ -92,7 +133,7 @@ impl LinkProto {
         self.next_seq = self.next_seq.wrapping_add(1);
         self.awaiting = Some(seq);
         self.reply = None;
-        self.outbox.push_back([TAG_CLOCK, seq, out]);
+        self.outbox.push_back([TAG_CLOCK, seq, out, 0]);
         seq
     }
 
@@ -107,12 +148,21 @@ impl LinkProto {
         None
     }
 
-    /// Abandon the exchange `seq` (timed out). Later replies for it are ignored.
+    /// Abandon the exchange `seq` (timed out). Later replies for it are ignored,
+    /// and the peer is told, so the side that failed to answer is the side that
+    /// finds out about it.
     pub fn abandon(&mut self, seq: u8) {
         if self.awaiting == Some(seq) {
             self.awaiting = None;
             self.reply = None;
+            self.outbox.push_back([TAG_GAVE_UP, seq, 0, 0]);
         }
+    }
+
+    /// Has the peer told us it gave up waiting on one of our replies? Consumes
+    /// the flag, so the UI sees each give-up once.
+    pub fn take_peer_gave_up(&mut self) -> bool {
+        std::mem::replace(&mut self.peer_gave_up, false)
     }
 
     /// Feed one inbound packet. Answering a clock happens *here*, in the
@@ -127,16 +177,24 @@ impl LinkProto {
                 let (seq, byte) = (pkt[1], pkt[2]);
                 // Reply with the byte we are presenting *right now*, before the
                 // serial engine picks the clocked byte up and overwrites SB.
-                self.outbox.push_back([TAG_REPLY, seq, self.own_output]);
+                let sb = self.own_output;
                 self.slave_input.push_back(byte);
+                let lag = self.lag();
+                self.outbox.push_back([TAG_REPLY, seq, sb, lag]);
             }
             Some(TAG_REPLY) if pkt.len() >= 3 => {
                 let (seq, byte) = (pkt[1], pkt[2]);
+                // v3 appends the responder's backlog. Absent on a shorter
+                // packet, which we read as "no news" rather than as healthy.
+                if let Some(&lag) = pkt.get(3) {
+                    self.peer_lag = lag;
+                }
                 if self.awaiting == Some(seq) {
                     self.reply = Some(byte);
                 }
                 // A reply for any other seq is stale by definition — drop it.
             }
+            Some(TAG_GAVE_UP) => self.peer_gave_up = true,
             _ => {}
         }
     }
@@ -146,8 +204,9 @@ impl LinkProto {
     /// discarded so a stray v1 packet is inert rather than malformed.
     fn own_peer_presents(&mut self, _byte: u8) {}
 
-    /// Take the next packet the transport should send.
-    pub fn pop_outbound(&mut self) -> Option<[u8; 3]> {
+    /// Take the next packet the transport should send. Send [`packet_len`]
+    /// bytes of it — the array is sized for the largest tag.
+    pub fn pop_outbound(&mut self) -> Option<[u8; 4]> {
         self.outbox.pop_front()
     }
 
@@ -157,13 +216,13 @@ impl LinkProto {
     }
 }
 
-/// Wire length for a packet with the given tag. Tag 0 is 2 bytes (v1 layout),
-/// tags 2 and 3 are 3.
+/// Wire length for a packet with the given tag: tag 0 is 2 bytes (the v1
+/// layout, inbound only), a clock is 3, a reply is 4 (it carries `lag`).
 pub fn packet_len(tag: u8) -> usize {
-    if tag == TAG_OUTPUT {
-        2
-    } else {
-        3
+    match tag {
+        TAG_OUTPUT => 2,
+        TAG_REPLY => 4,
+        _ => 3, // clock, give-up
     }
 }
 
@@ -580,10 +639,69 @@ mod tests {
 
         assert_eq!(
             p.pop_outbound(),
-            Some([TAG_REPLY, 7, 0x3C]),
+            Some([TAG_REPLY, 7, 0x3C, LAG_HEALTHY]),
             "reply must carry our pre-transfer SB, not the master's byte"
         );
         assert_eq!(p.poll_slave_input(), Some(0xA5));
+    }
+
+    /// The signal the UI needs: a responder whose *game* has stopped reading
+    /// clocked bytes reports a rising lag, even though its transport is
+    /// answering every clock on time. Byte counts cannot see this — which is
+    /// why the stall pill could never light up on the side that was actually
+    /// behind.
+    #[test]
+    fn lag_reports_a_game_that_stopped_reading() {
+        let mut p = LinkProto::new();
+        p.set_output(0x11);
+
+        // Three clocks arrive and the game reads none of them.
+        for seq in 0..3u8 {
+            p.on_packet(&[TAG_CLOCK, seq, 0xA0 + seq]);
+        }
+        let lags: Vec<u8> = std::iter::from_fn(|| p.pop_outbound())
+            .map(|pkt| pkt[3])
+            .collect();
+        assert_eq!(lags, vec![0, 1, 2], "lag must climb as the backlog grows");
+
+        // The game catches up; the next reply says so.
+        while p.poll_slave_input().is_some() {}
+        p.on_packet(&[TAG_CLOCK, 9, 0xFF]);
+        assert_eq!(p.pop_outbound().unwrap()[3], LAG_HEALTHY);
+    }
+
+    /// The other half of the mirror: the master learns the responder is behind
+    /// from the reply, so both devices can name the same culprit at once.
+    #[test]
+    fn peer_lag_crosses_the_wire() {
+        let mut master = LinkProto::new();
+        assert_eq!(master.peer_lag(), LAG_HEALTHY);
+
+        let seq = master.begin_exchange(0x5A);
+        master.on_packet(&[TAG_REPLY, seq, 0x3C, 4]);
+
+        assert_eq!(master.take_reply(seq), Some(0x3C));
+        assert_eq!(
+            master.peer_lag(),
+            4,
+            "master must be able to say the partner is behind"
+        );
+    }
+
+    /// A healthy round trip through the model wire leaves both sides reporting
+    /// no lag, so the pill stays quiet during normal play.
+    #[test]
+    fn healthy_play_reports_no_lag_on_either_side() {
+        let pair = Pair::new();
+        let mut master = Serial::new();
+        let mut slave = Serial::new();
+        master.connect(Box::new(pair.endpoint(0)));
+        slave.connect(Box::new(pair.endpoint(1)));
+
+        run_v2(&pair, &mut master, &mut slave);
+
+        assert_eq!(pair.proto[0].borrow().peer_lag(), LAG_HEALTHY);
+        assert_eq!(pair.proto[1].borrow().lag(), LAG_HEALTHY);
     }
 
     /// Pairing alone is not enough.
@@ -632,5 +750,39 @@ mod tests {
         // And a reply arriving after we gave up is inert.
         p.on_packet(&[TAG_REPLY, seq, 0x99]);
         assert_eq!(p.take_reply(seq), None);
+    }
+
+    /// Giving up is announced, so the peer learns it was the unresponsive one.
+    /// Without this the only side that knows the link broke is the side that
+    /// was already doing its job.
+    #[test]
+    fn giving_up_tells_the_peer() {
+        let mut master = LinkProto::new();
+        let seq = master.begin_exchange(0x5A);
+        assert_eq!(master.pop_outbound(), Some([TAG_CLOCK, seq, 0x5A, 0]));
+        master.abandon(seq);
+        let gave_up = master.pop_outbound().expect("give-up must be announced");
+        assert_eq!(gave_up[0], TAG_GAVE_UP);
+        assert_eq!(packet_len(gave_up[0]), 3);
+
+        let mut peer = LinkProto::new();
+        assert!(!peer.take_peer_gave_up());
+        peer.on_packet(&gave_up[..3]);
+        assert!(peer.take_peer_gave_up(), "peer must learn it went unanswered");
+        assert!(!peer.take_peer_gave_up(), "and only learn it once");
+    }
+
+    /// Abandoning an exchange we are not waiting on is silent — no phantom
+    /// give-up packet for the peer to misread.
+    #[test]
+    fn abandoning_an_unheld_exchange_is_silent() {
+        let mut p = LinkProto::new();
+        let seq = p.begin_exchange(0x11);
+        while p.pop_outbound().is_some() {}
+        p.on_packet(&[TAG_REPLY, seq, 0x22, LAG_HEALTHY]);
+        assert_eq!(p.take_reply(seq), Some(0x22));
+
+        p.abandon(seq); // already resolved
+        assert_eq!(p.pop_outbound(), None);
     }
 }
