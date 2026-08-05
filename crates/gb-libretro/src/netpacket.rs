@@ -85,19 +85,10 @@ pub static CALLBACK: RetroNetpacketCallback = RetroNetpacketCallback {
     protocol_version: PROTOCOL.as_ptr() as *const c_char,
 };
 
-/// What the emulation loop should do about the link on its next frame.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Pending {
-    None,
-    Attach,
-    Detach,
-}
-
 struct NetLink {
     send_fn: Option<SendFn>,
     poll_receive_fn: Option<PollReceiveFn>,
     active: bool,
-    pending: Pending,
     proto: LinkProto,
     steps_since_poll: u32,
 }
@@ -108,7 +99,6 @@ impl NetLink {
             send_fn: None,
             poll_receive_fn: None,
             active: false,
-            pending: Pending::None,
             proto: LinkProto::new(),
             steps_since_poll: 0,
         }
@@ -147,11 +137,6 @@ pub fn is_active() -> bool {
     with_net(|n| n.active)
 }
 
-/// Consume the pending link lifecycle action (attach/detach the transport).
-pub fn take_pending() -> Pending {
-    with_net(|n| std::mem::replace(&mut n.pending, Pending::None))
-}
-
 /// Push everything the protocol wants to send. Safe to call with no borrow held;
 /// takes one internally and drops it before returning.
 fn flush_outbox() {
@@ -184,7 +169,6 @@ unsafe extern "C" fn np_start(_client_id: u16, send_fn: SendFn, poll_receive_fn:
         n.active = true;
         n.steps_since_poll = 0;
         n.proto.reset();
-        n.pending = Pending::Attach;
     });
 }
 
@@ -202,7 +186,6 @@ unsafe extern "C" fn np_stop() {
         n.send_fn = None;
         n.poll_receive_fn = None;
         n.proto.reset();
-        n.pending = Pending::Detach;
     });
 }
 

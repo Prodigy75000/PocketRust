@@ -10,7 +10,6 @@
 mod netpacket;
 
 use gb_core::{Button, Colorize, GameBoy, SCREEN_H, SCREEN_W};
-use netpacket::Pending;
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
@@ -323,21 +322,31 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     true
 }
 
-/// Connect the netpacket transport to the running Game Boy's link cable. Called
-/// from `retro_run` (not from the netpacket callback) so it never re-enters the
-/// core `State` borrow.
-fn attach_netlink() {
+/// Make the Game Boy's link cable match whether a netpacket session is live.
+///
+/// Called from `retro_run` (not from the netpacket callback) so it never
+/// re-enters the core `State` borrow, and called on **every** frame rather than
+/// on a one-shot Attach/Detach edge.
+///
+/// The edge version dropped sessions. A GameLink session starts when the peers
+/// connect, which is ~2 s before `retro_load_game` runs (measured 2026-08-05:
+/// netpacket start at 02:17:40.216, load at 02:17:42.105). An Attach consumed in
+/// that window found `s.gb == None`, did nothing, and was gone — the cable never
+/// attached for the rest of the session, so the Cable Club attendant refused the
+/// pair while the app still showed a healthy link. Whether it broke came down to
+/// whether one `retro_run` happened to land in the gap, which is exactly the
+/// intermittency that was reported.
+///
+/// Idempotent: reconciling to a state that already holds does nothing.
+fn reconcile_netlink() {
+    let active = netpacket::is_active();
     with_state(|s| {
         if let Some(gb) = &mut s.gb {
-            gb.connect_link(Box::new(netpacket::NetpacketLink));
-        }
-    });
-}
-
-fn detach_netlink() {
-    with_state(|s| {
-        if let Some(gb) = &mut s.gb {
-            gb.disconnect_link();
+            match (active, gb.link_connected()) {
+                (true, false) => gb.connect_link(Box::new(netpacket::NetpacketLink)),
+                (false, true) => gb.disconnect_link(),
+                _ => {}
+            }
         }
     });
 }
@@ -351,11 +360,7 @@ pub extern "C" fn retro_unload_game() {
 pub extern "C" fn retro_run() {
     // Link-cable lifecycle + inbound drain, done outside the State borrow so the
     // netpacket callbacks (which touch their own global) never nest it.
-    match netpacket::take_pending() {
-        Pending::Attach => attach_netlink(),
-        Pending::Detach => detach_netlink(),
-        Pending::None => {}
-    }
+    reconcile_netlink();
     if netpacket::is_active() {
         // Frontend calls our `receive` for each queued inbound byte.
         netpacket::poll_receive();
