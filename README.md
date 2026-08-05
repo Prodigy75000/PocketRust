@@ -18,7 +18,8 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm` |
 | Colorization | ✅ automatic GBC-style palette for monochrome games |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
-| Link cable | ✅ serial transfer, local and over TCP between two instances |
+| Link cable | ✅ serial transfer: local, TCP between two instances, and networked play over the libretro netpacket interface (`pocketrust-link-4`) |
+| Networked link | ✅ sequenced paired exchange, sub-frame polling, retransmit — byte-perfect through 1-in-3 packet loss |
 
 Compatibility: **4577 of 4794** GB / GBC ROMs (95.5%) boot and render in a
 headless smoke test of a large No-Intro-style set. The remaining misses are a
