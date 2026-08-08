@@ -16,10 +16,10 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Interrupts | ✅ VBlank, STAT, Timer, Serial, Joypad |
 | Cartridges | ✅ no-MBC, MBC1, MBC2, MBC3 (+ RTC), MBC5, HuC1, HuC3 (+ RTC); battery-backed save RAM |
 | MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm` |
-| Colorization | ✅ automatic GBC-style palette for monochrome games |
+| Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and networked play over the libretro netpacket interface (`pocketrust-link-4`) |
-| Networked link | ✅ sequenced paired exchange, sub-frame polling, retransmit — byte-perfect through 1-in-3 packet loss |
+| Networked link | ✅ sequenced paired exchange, sub-frame polling, retransmit; byte-perfect through 1-in-3 packet loss |
 
 Compatibility: **4577 of 4794** GB / GBC ROMs (95.5%) boot and render in a
 headless smoke test of a large No-Intro-style set. The remaining misses are a
@@ -66,7 +66,7 @@ cargo run --release -p gb-runner --bin smoke -- path/to/roms/
 ## libretro core
 
 `gb-libretro` is a standard libretro core (the full `retro_*` C ABI). It builds a
-single `cdylib` — one crate, one source of truth — that every Trophy Hub client
+single `cdylib` (one crate, one source of truth) that every Trophy Hub client
 loads by `dlopen` + `dlsym`: Android, desktop (Windows/macOS/Linux) and iOS. The
 output is named for the libretro convention (`gbcore_libretro`), so the file is:
 
@@ -107,14 +107,14 @@ cargo build --release -p gb-libretro --target armv7-linux-androideabi
 # -> target/<triple>/release/libgbcore_libretro.so
 ```
 
-The config pins `-Wl,-z,max-page-size=16384` so the `.so` is 16 KB-aligned —
-required or the Play Store blocks uploads targeting API 35+. Drop the resulting
+The config pins `-Wl,-z,max-page-size=16384` so the `.so` is 16 KB-aligned, which
+the Play Store requires for uploads targeting API 35+. Drop the resulting
 `.so` into the app's `jniLibs/<abi>/`.
 
 ### iOS (`.dylib`, embedded in a co-signed `.framework`)
 
 The iOS host `dlopen`s each core from an embedded, co-signed framework (dlsym
-loader — same path Gambatte takes), so the core is a plain `cdylib`; no
+loader, the same path Gambatte takes), so the core is a plain `cdylib`; no
 `staticlib` and no code change are needed.
 
 ```sh
@@ -128,7 +128,7 @@ cargo build --release -p gb-libretro --target aarch64-apple-ios-sim
 ```
 
 Then wrap the `.dylib` in a `.framework`, set its install name, and co-sign it
-before embedding — exactly as the existing Gambatte core is packaged. Build on
+before embedding, exactly as the existing Gambatte core is packaged. Build on
 macOS with the Xcode command-line tools installed (provides the iOS linker).
 
 ## GameLink (link cable over the network)
