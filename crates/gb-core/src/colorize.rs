@@ -159,32 +159,129 @@ mod tests {
     }
 
     #[test]
-    fn gbc_correction_tames_the_neon_default() {
-        // The unlicensed-game default palette's raw color 1 is 7BFF31 neon green
-        // (5-bit 0x0F,0x1F,0x06). Correction must desaturate it to a muted sage,
-        // not leave it as nuclear waste.
+    fn gbc_correction_tames_neon_green() {
+        // Palette 3's raw color 1 is 7BFF31 neon green (5-bit 0x0F,0x1F,0x06).
+        // Correction must desaturate it to a muted sage, not leave it as
+        // nuclear waste.
         assert_eq!(gbc_correct(0x0F, 0x1F, 0x06), 0x0083C656);
         // White and black are (near) fixed points.
         assert_eq!(gbc_correct(0x1F, 0x1F, 0x1F), 0x00F0F0F0);
         assert_eq!(gbc_correct(0x00, 0x00, 0x00), 0x00000000);
     }
+
+    // Four of the 29 triplet entries point 6 bytes past a palette boundary, so
+    // the palette they name starts on the last colour of one row of
+    // PALETTE_COLORS and finishes in the next. Reading `PALETTE_COLORS[off / 8]`
+    // instead lands on an unrelated palette; for 0x1E that is palette 3, whose
+    // colour 1 is the neon green that turned Super Mario Land's Mario into
+    // nuclear waste. Spelled out here because the wrong answer is a perfectly
+    // plausible-looking palette, so only the exact colours catch it.
+    #[test]
+    fn misaligned_offsets_straddle_two_palette_rows() {
+        // 0x1E = colour 15 = palette 3 colour 3, then palette 4 colours 0..2.
+        assert_eq!(
+            colors_at(0x1E),
+            [0x00000000, 0x00F0F0F0, 0x00E18096, 0x007F3848]
+        );
+        // The old row-indexed decode returned palette 3 whole; make sure we are
+        // not accidentally back on it.
+        assert_ne!(
+            colors_at(0x1E),
+            [0x00F0F0F0, 0x0083C656, 0x00106010, 0x00000000]
+        );
+        // An aligned offset must be unaffected: 0x18 = palette 3, whole.
+        assert_eq!(
+            colors_at(0x18),
+            [0x00F0F0F0, 0x0083C656, 0x00106010, 0x00000000]
+        );
+    }
+
+    // End-to-end over the five Nintendo-published games in our ROM corpus whose
+    // boot-ROM assignment lands on a misaligned triplet entry. Expected colours
+    // are gambatte's GBC boot-ROM palette table (gbcpalettes.h) run through our
+    // colour correction; before the fix every one of these was wrong.
+    #[test]
+    fn misaligned_games_match_boot_rom() {
+        // (title checksum, 4th title letter, bg, obj0, obj1)
+        const CASES: &[(u8, u8, [u32; 4], [u32; 4], [u32; 4])] = &[
+            // SUPER MARIOLAND -> p30A. Mario is white/red, not green.
+            (
+                0x46,
+                b'E',
+                [0x00B4C2E1, 0x00F0DEB0, 0x00975256, 0x00000000],
+                [0x00000000, 0x00F0F0F0, 0x00E18096, 0x007F3848],
+                [0x00000000, 0x00F0F0F0, 0x00E18096, 0x007F3848],
+            ),
+            // KIRBY DREAM LAND -> p508.
+            (
+                0x49,
+                b'B',
+                [0x00A4B0DB, 0x00E8BA4D, 0x000C480C, 0x00000000],
+                [0x00DA5C71, 0x00A90027, 0x004E0012, 0x00000000],
+                [0x000F3EAA, 0x00F0F0F0, 0x00F0D8A0, 0x001F9EBA],
+            ),
+            // KIRBY2 -> p508.
+            (
+                0xB3,
+                b'B',
+                [0x00A4B0DB, 0x00E8BA4D, 0x000C480C, 0x00000000],
+                [0x00DA5C71, 0x00A90027, 0x004E0012, 0x00000000],
+                [0x000F3EAA, 0x00F0F0F0, 0x00F0D8A0, 0x001F9EBA],
+            ),
+            // KIRBY BLOCKBALL -> p508.
+            (
+                0x27,
+                b'B',
+                [0x00A4B0DB, 0x00E8BA4D, 0x000C480C, 0x00000000],
+                [0x00DA5C71, 0x00A90027, 0x004E0012, 0x00000000],
+                [0x000F3EAA, 0x00F0F0F0, 0x00F0D8A0, 0x001F9EBA],
+            ),
+            // TOPRANKTENNIS -> p502.
+            (
+                0xF0,
+                b'R',
+                [0x0073BA32, 0x00F0F0F0, 0x00D84E6A, 0x00000000],
+                [0x00F0F0F0, 0x00F0F0F0, 0x0071B6D0, 0x000F3EAA],
+                [0x00F0F0F0, 0x00E49685, 0x006E241E, 0x00000000],
+            ),
+        ];
+        for &(checksum, fourth, bg, obj0, obj1) in CASES {
+            let pal = DmgPalette::auto(checksum, fourth, true);
+            assert_eq!(pal.bg, bg, "bg for checksum {checksum:#04X}");
+            assert_eq!(pal.obj0, obj0, "obj0 for checksum {checksum:#04X}");
+            assert_eq!(pal.obj1, obj1, "obj1 for checksum {checksum:#04X}");
+        }
+    }
 }
 
 /// Expand one boot-ROM palette (a byte offset into the colour table) to RGB888,
 /// through the Game Boy Color LCD color-correction matrix.
+///
+/// The offset is a *raw byte* offset into the boot ROM's colour table, which is
+/// one flat run of RGB555 colours: 2 bytes per colour, 4 colours per palette.
+/// Most triplet entries are multiples of 8 and so name a whole palette, but four
+/// of them (0x1E, 0xB6, 0xDE) are 6 past a boundary and deliberately start on
+/// the *last* colour of one palette, running on into the next. So index the
+/// table by colour, never by row: `PALETTE_COLORS[offset / 8]` silently rounds
+/// those four down to a completely unrelated palette.
+///
+/// The highest offset in `TRIPLETS` is 0xE8, whose four colours end exactly on
+/// the last entry of the table, so the indexing below cannot run off the end.
 fn colors_at(offset: u8) -> [u32; 4] {
-    let row = PALETTE_COLORS[(offset / 8) as usize];
+    let first = offset as usize / 2;
     let mut out = [0u32; 4];
     for (c, slot) in out.iter_mut().enumerate() {
-        *slot = gbc_correct(row[c * 3], row[c * 3 + 1], row[c * 3 + 2]);
+        let row = PALETTE_COLORS[(first + c) / 4];
+        let i = ((first + c) % 4) * 3;
+        *slot = gbc_correct(row[i], row[i + 1], row[i + 2]);
     }
     out
 }
 
 /// The Game Boy Color's LCD did not display raw RGB555 values; it ran them
 /// through a fixed response that heavily desaturates and slightly dims. Without
-/// it the boot-ROM palettes look like nuclear waste (e.g. the unlicensed-game
-/// default's `7BFF31` neon green). This is higan's integer GBC matrix, matching
+/// it the boot-ROM palettes look like nuclear waste (e.g. palette 3's `7BFF31`
+/// neon green). This is higan's integer GBC matrix, matching
 /// how real hardware (and Gambatte with color-correction on) actually look.
 /// Inputs are 5-bit channels; output is 0x00RRGGBB.
 pub(crate) fn gbc_correct(r: u8, g: u8, b: u8) -> u32 {
