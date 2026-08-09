@@ -535,14 +535,26 @@ impl Apu {
     fn emit_sample(&mut self) {
         let (mut left, mut right) = (0i32, 0i32);
         let chans = [
-            self.ch1.output(),
-            self.ch2.output(),
-            self.ch3.output(),
-            self.ch4.output(),
+            (self.ch1.output(), self.ch1.env.dac_on()),
+            (self.ch2.output(), self.ch2.env.dac_on()),
+            (self.ch3.output(), self.ch3.dac_on),
+            (self.ch4.output(), self.ch4.env.dac_on()),
         ];
-        for (i, &digital) in chans.iter().enumerate() {
-            // DAC maps 0..15 to a signed swing.
-            let sample = digital as i32 * 2 - 15;
+        for (i, &(digital, dac_on)) in chans.iter().enumerate() {
+            // Three cases, and the middle one is easy to lose. A powered DAC
+            // maps digital 0..15 to a signed swing, so a channel that is merely
+            // *disabled* still sits at the bottom rail (-15) rather than at
+            // silence. A channel whose DAC is *off* is disconnected from the
+            // mixer entirely and contributes nothing at all.
+            //
+            // Collapsing those two into "digital 0" is what made a fully quiet
+            // APU emit a rock-solid -15 per channel: with all four routed at
+            // NR50 volume 7 that is a constant -19200, 59% of full scale, held
+            // for as long as the game is silent. Every interruption of the
+            // stream (pause, resume, underrun) then stepped to or from it and
+            // clicked. Gambatte does the same thing we do here: see
+            // `Channel1::update`, `dacIsOn() ? soBaseVol & soMask_ : 0`.
+            let sample = if dac_on { digital as i32 * 2 - 15 } else { 0 };
             if self.nr51 & (1 << i) != 0 {
                 right += sample;
             }
@@ -853,5 +865,76 @@ impl Noise {
         c.u8(&mut self.divisor_code);
         self.length.transfer(c);
         self.env.transfer(c);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quiet APU must emit true silence, not a DC rail.
+    ///
+    /// The DAC of a channel is powered by the top 5 bits of its envelope
+    /// register, so at reset all four are off, which on hardware disconnects
+    /// them from the mixer. If instead they are treated as "digital 0" they each
+    /// sit at the bottom of the DAC's swing (-15) and the mixer sums a large
+    /// constant: with all four routed by NR51 at NR50 volume 7 that is -19200,
+    /// 59% of full scale, held for as long as the game is silent. Nothing about
+    /// it is audible on its own, which is why it survived: it only announces
+    /// itself as a click when the stream starts or stops, so pausing or resuming
+    /// the emulator popped.
+    #[test]
+    fn a_quiet_apu_emits_silence_not_a_dc_rail() {
+        let mut apu = Apu::new();
+        // Loudest, everything routed to both sides: the worst case for the bug
+        // and the exact configuration Super Mario Land leaves behind.
+        apu.write(0xFF24, 0x77);
+        apu.write(0xFF25, 0xFF);
+        assert!(apu.power, "precondition: APU is powered");
+        for ch in [
+            apu.ch1.env.dac_on(),
+            apu.ch2.env.dac_on(),
+            apu.ch3.dac_on,
+            apu.ch4.env.dac_on(),
+        ] {
+            assert!(!ch, "precondition: every DAC is off at reset");
+        }
+
+        apu.step(CPU_HZ / 100); // 10 ms, ~441 stereo samples
+        let out = apu.take_output();
+        assert!(!out.is_empty(), "precondition: samples were produced");
+        assert!(
+            out.iter().all(|&s| s == 0),
+            "quiet APU emitted a DC level: min {:?} max {:?}",
+            out.iter().min(),
+            out.iter().max()
+        );
+    }
+
+    /// The counterpart, so the fix above cannot be "return 0 more often": a
+    /// channel that is *disabled* while its DAC is still powered does sit at the
+    /// bottom rail. Hardware only disconnects on DAC-off, and gambatte models it
+    /// the same way (`Channel1::update`: `master_ ? ... : outLow`).
+    #[test]
+    fn a_powered_dac_still_rails_while_the_channel_is_disabled() {
+        let mut apu = Apu::new();
+        apu.write(0xFF24, 0x77);
+        apu.write(0xFF25, 0xFF);
+        // NR12: initial volume 15, no envelope. Powers CH1's DAC without
+        // triggering the channel, so it stays disabled.
+        apu.write(0xFF12, 0xF0);
+        assert!(apu.ch1.env.dac_on(), "precondition: CH1 DAC is on");
+        assert!(!apu.ch1.enabled, "precondition: CH1 is still disabled");
+
+        apu.step(CPU_HZ / 100);
+        let out = apu.take_output();
+        // -15 from CH1 only, times the NR50 volume (7 + 1), times the mixer
+        // scale of 40.
+        assert!(
+            out.iter().all(|&s| s == -15 * 8 * 40),
+            "expected the bottom rail from one powered DAC, got min {:?} max {:?}",
+            out.iter().min(),
+            out.iter().max()
+        );
     }
 }

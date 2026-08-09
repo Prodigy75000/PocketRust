@@ -3,9 +3,19 @@
 //!
 //!   cargo run --release -p gb-runner --bin rec -- <rom.gb> <warmup> <frames> <out.wav>
 
-use gb_core::{GameBoy, SAMPLE_RATE};
+use gb_core::{Button, GameBoy, SAMPLE_RATE};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+
+/// Pulse Start (a quarter of every 16 frames), the same shape `smoke` uses. A
+/// game parked on a "press start" screen is often silent there, so measuring
+/// its audio means getting past it. Off by default: a recording with input in
+/// it is not reproducible frame-for-frame in the way a passive one is.
+fn start_pulse(gb: &mut GameBoy, frame: u32, enabled: bool) {
+    if enabled {
+        gb.set_button(Button::Start, frame % 16 < 4);
+    }
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -18,13 +28,16 @@ fn main() {
     let mut gb = GameBoy::new(rom);
     println!("Loaded '{}': warmup {warmup}, recording {frames} frames", gb.title());
 
-    for _ in 0..warmup {
+    let mash = std::env::var("RECSTART").is_ok();
+    for f in 0..warmup {
+        start_pulse(&mut gb, f, mash);
         gb.step_frame();
         gb.take_audio(); // discard
     }
 
     let mut samples: Vec<i16> = Vec::new();
-    for _ in 0..frames {
+    for f in 0..frames {
+        start_pulse(&mut gb, warmup + f, mash);
         gb.step_frame();
         samples.extend(gb.take_audio());
     }
