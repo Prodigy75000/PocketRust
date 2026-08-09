@@ -88,6 +88,14 @@ const RETRO_DEVICE_ID_JOYPAD_LEFT: u32 = 6;
 const RETRO_DEVICE_ID_JOYPAD_RIGHT: u32 = 7;
 const RETRO_DEVICE_ID_JOYPAD_A: u32 = 8;
 
+const RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS: u32 = 35;
+const RETRO_ENVIRONMENT_SET_MEMORY_MAPS: u32 = 36;
+
+const RETRO_MEMDESC_CONST: u64 = 1 << 0;
+const RETRO_MEMDESC_SYSTEM_RAM: u64 = 1 << 2;
+const RETRO_MEMDESC_SAVE_RAM: u64 = 1 << 3;
+const RETRO_MEMDESC_VIDEO_RAM: u64 = 1 << 4;
+
 const RETRO_MEMORY_SAVE_RAM: u32 = 0;
 const RETRO_MEMORY_SYSTEM_RAM: u32 = 2;
 
@@ -309,6 +317,9 @@ pub extern "C" fn retro_reset() {
         }
         s.gb = Some(gb);
         refresh_variables(s); // re-apply the colorize option
+        // A reset rebuilds the cartridge, so the ROM and save-RAM allocations
+        // move and their descriptors would otherwise point at freed memory.
+        publish_memory_map(s);
     });
 }
 
@@ -339,6 +350,17 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
         // RTC footer out of it on the first frame (see `restore_rtc` in retro_run).
         s.restore_rtc = true;
         refresh_variables(s); // apply the host's colorize option, if any
+        // After `s.gb` is populated: the descriptors point into it.
+        publish_memory_map(s);
+        if let Some(env) = s.env {
+            let mut yes = true;
+            unsafe {
+                env(
+                    RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS,
+                    &mut yes as *mut bool as *mut c_void,
+                );
+            }
+        }
     });
     true
 }
@@ -450,6 +472,215 @@ pub extern "C" fn retro_run() {
             }
         }
     });
+}
+
+// --- Memory map ---------------------------------------------------------------
+
+#[repr(C)]
+struct RetroMemoryDescriptor {
+    flags: u64,
+    ptr: *mut c_void,
+    offset: usize,
+    start: usize,
+    select: usize,
+    disconnect: usize,
+    len: usize,
+    addrspace: *const c_char,
+}
+
+#[repr(C)]
+struct RetroMemoryMap {
+    descriptors: *const RetroMemoryDescriptor,
+    num_descriptors: u32,
+}
+
+const fn desc(flags: u64, ptr: *const u8, start: usize, select: usize, len: usize) -> RetroMemoryDescriptor {
+    RetroMemoryDescriptor {
+        flags,
+        ptr: ptr as *mut c_void,
+        offset: 0,
+        start,
+        select,
+        disconnect: 0,
+        len,
+        addrspace: ptr::null(),
+    }
+}
+
+/// Publish the guest address space to the front-end.
+///
+/// This is the descriptor table a front-end prefers over the two legacy
+/// `retro_get_memory_*` ids: rcheevos builds its region table from it, and the
+/// cheat engine and any RAM watch address through it. Modelled on the table
+/// gambatte publishes, so a front-end sees the same shape from either core.
+///
+/// Two things make this safe to hand out as raw pointers. Work RAM, video RAM,
+/// OAM and high RAM are inline arrays inside the `GameBoy`, which itself lives
+/// inline in the process-global `State`, so their addresses are fixed for the
+/// life of the process and survive a reset. The ROM and the cartridge RAM are
+/// heap allocations owned by the cartridge, so they move when the machine is
+/// rebuilt: that is why this is re-published from `retro_reset` and not just
+/// from `retro_load_game`. The front-end deep-copies the table during the call,
+/// so the array below can live on the stack.
+///
+/// Deliberately absent: the switchable ROM bank at 0x4000 and the switchable
+/// work-RAM bank at 0xD000 on a Game Boy Color. Both would need a pointer that
+/// is only correct until the game next writes a bank register, and a descriptor
+/// that silently goes stale is worse than one that was never published. Bank 0
+/// of each is fixed, and the Color's banks 1-7 are published as one contiguous
+/// block at 0x10000, which is where rcheevos expects to find them.
+fn publish_memory_map(s: &mut State) {
+    let env = match s.env {
+        Some(env) => env,
+        None => return,
+    };
+    let gb = match &s.gb {
+        Some(gb) => gb,
+        None => return,
+    };
+    let descs = memory_descriptors(gb);
+    let map = RetroMemoryMap {
+        descriptors: descs.as_ptr(),
+        num_descriptors: descs.len() as u32,
+    };
+    unsafe {
+        env(
+            RETRO_ENVIRONMENT_SET_MEMORY_MAPS,
+            &map as *const RetroMemoryMap as *mut c_void,
+        );
+    }
+}
+
+/// The descriptor table itself, split out from the environment call so it can be
+/// asserted against directly.
+fn memory_descriptors(gb: &GameBoy) -> Vec<RetroMemoryDescriptor> {
+    let mut descs: Vec<RetroMemoryDescriptor> = Vec::with_capacity(8);
+    // Work RAM. Bank 0 is permanently at 0xC000; 0xD000 shows bank 1 on a DMG
+    // and on a Color until the game selects another.
+    descs.push(desc(RETRO_MEMDESC_SYSTEM_RAM, gb.wram().as_ptr(), 0xC000, 0, 0x1000));
+    descs.push(desc(RETRO_MEMDESC_SYSTEM_RAM, gb.wram()[0x1000..].as_ptr(), 0xD000, 0, 0x1000));
+    descs.push(desc(RETRO_MEMDESC_SYSTEM_RAM, gb.hram().as_ptr(), 0xFF80, 0, 0x7F));
+    descs.push(desc(RETRO_MEMDESC_VIDEO_RAM, gb.vram().as_ptr(), 0x8000, 0, 0x2000));
+    descs.push(desc(0, gb.oam().as_ptr(), 0xFE00, 0xFFFF_FFE0, 0xA0));
+    descs.push(desc(RETRO_MEMDESC_CONST, gb.rom().as_ptr(), 0x0000, 0, 0x4000));
+    if gb.has_battery() && !gb.sram().is_empty() {
+        descs.push(desc(
+            RETRO_MEMDESC_SAVE_RAM,
+            gb.sram().as_ptr(),
+            0xA000,
+            !0x1FFF,
+            gb.sram().len(),
+        ));
+    }
+    if gb.is_cgb() {
+        // Work-RAM banks 2-7 as one block above the 16-bit space, which is where
+        // rcheevos reads a Game Boy Color's extended work RAM.
+        //
+        // Banks *2*-7, not 1-7. Bank 1 is already published at 0xD000 above, and
+        // rcheevos lays its regions out end to end: cartridge RAM, then the
+        // 0xC000-0xDFFF pair, then this block. Starting this one a bank early
+        // double-counts bank 1 and shifts every address in the extended region
+        // down by 0x1000, so each achievement reads a plausible byte from the
+        // wrong bank. Six banks, 0x6000 bytes. Same as gambatte's descriptor.
+        descs.push(desc(
+            RETRO_MEMDESC_SYSTEM_RAM,
+            gb.wram()[0x2000..].as_ptr(),
+            0x10000,
+            0xFFFF_A000,
+            0x6000,
+        ));
+    }
+    descs
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+
+    fn bare_rom(cgb: bool) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0143] = if cgb { 0xC0 } else { 0x00 };
+        rom[0x0147] = 0x00; // ROM only, no cartridge RAM
+        rom
+    }
+
+    fn find(descs: &[RetroMemoryDescriptor], start: usize) -> Option<&RetroMemoryDescriptor> {
+        descs.iter().find(|d| d.start == start)
+    }
+
+    /// The Game Boy Color's extended work RAM starts at **bank 2**, because bank
+    /// 1 is already published at 0xD000 and rcheevos lays its regions out end to
+    /// end. Publishing bank 1 twice shifts every address in the extended region
+    /// down by one bank, and the reads still succeed: they just come back with a
+    /// plausible byte from the wrong bank, which no smoke test would notice.
+    /// This was written the wrong way round once already.
+    #[test]
+    fn cgb_extended_wram_starts_at_bank_two() {
+        let gb = GameBoy::new(bare_rom(true));
+        let descs = memory_descriptors(&gb);
+        let base = gb.wram().as_ptr() as usize;
+
+        let bank1 = find(&descs, 0xD000).expect("0xD000 descriptor");
+        assert_eq!(bank1.ptr as usize - base, 0x1000, "0xD000 must be bank 1");
+
+        let ext = find(&descs, 0x10000).expect("extended work RAM descriptor");
+        assert_eq!(
+            ext.ptr as usize - base,
+            0x2000,
+            "extended block must start at bank 2, not bank 1"
+        );
+        assert_eq!(ext.len, 0x6000, "six banks, not seven");
+        assert_eq!(ext.flags & RETRO_MEMDESC_SYSTEM_RAM, RETRO_MEMDESC_SYSTEM_RAM);
+    }
+
+    /// A monochrome game has no extended block at all: it only ever sees banks
+    /// 0 and 1, both already published in the 16-bit space.
+    #[test]
+    fn dmg_publishes_no_extended_wram() {
+        let gb = GameBoy::new(bare_rom(false));
+        let descs = memory_descriptors(&gb);
+        assert!(find(&descs, 0x10000).is_none());
+        assert!(find(&descs, 0xC000).is_some());
+        assert!(find(&descs, 0xD000).is_some());
+    }
+
+    /// Cartridge RAM is only published when the cartridge actually has a
+    /// battery-backed chip. A descriptor with a null pointer or zero length is
+    /// worse than an absent one.
+    #[test]
+    fn save_ram_is_absent_without_a_battery() {
+        let gb = GameBoy::new(bare_rom(false));
+        assert!(!gb.has_battery());
+        assert!(find(&memory_descriptors(&gb), 0xA000).is_none());
+        for d in memory_descriptors(&gb) {
+            assert!(!d.ptr.is_null(), "descriptor at 0x{:X} has a null ptr", d.start);
+            assert!(d.len > 0, "descriptor at 0x{:X} has zero length", d.start);
+        }
+    }
+
+    /// Every published region has to fit inside the buffer it points into, or
+    /// the front-end reads past the end of our memory.
+    #[test]
+    fn published_lengths_fit_their_buffers() {
+        for cgb in [false, true] {
+            let gb = GameBoy::new(bare_rom(cgb));
+            let descs = memory_descriptors(&gb);
+            let wram = gb.wram().as_ptr() as usize;
+            for d in &descs {
+                let p = d.ptr as usize;
+                if (wram..wram + gb.wram().len()).contains(&p) {
+                    assert!(
+                        p + d.len <= wram + gb.wram().len(),
+                        "descriptor at 0x{:X} runs past the end of work RAM",
+                        d.start
+                    );
+                }
+            }
+            assert_eq!(find(&descs, 0x8000).unwrap().len, 0x2000);
+            assert_eq!(find(&descs, 0xFF80).unwrap().len, 0x7F);
+            assert_eq!(find(&descs, 0xFE00).unwrap().len, 0xA0);
+        }
+    }
 }
 
 // --- Guest memory exposure ----------------------------------------------------

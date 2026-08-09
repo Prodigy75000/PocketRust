@@ -181,6 +181,30 @@ impl GameBoy {
         &self.mmu.wram
     }
 
+    /// Video RAM: two 8 KiB banks, bank 0 first. A DMG only has bank 0, so its
+    /// 8 KiB is the leading half.
+    pub fn vram(&self) -> &[u8] {
+        &self.mmu.ppu.vram
+    }
+
+    /// Sprite attribute memory, guest 0xFE00..0xFE9F.
+    pub fn oam(&self) -> &[u8] {
+        &self.mmu.ppu.oam
+    }
+
+    /// High RAM, guest 0xFF80..0xFFFE. 0x7F bytes: the interrupt-enable
+    /// register at 0xFFFF sits above it and is not part of this block.
+    pub fn hram(&self) -> &[u8] {
+        &self.mmu.hram
+    }
+
+    /// The whole cartridge ROM image, banks laid out end to end. Bank 0 is the
+    /// leading 16 KiB, which is the only part permanently visible to the guest;
+    /// everything above it is whatever the mapper has selected at the time.
+    pub fn rom(&self) -> &[u8] {
+        self.mmu.cartridge.rom()
+    }
+
     /// Overwrite cartridge RAM from a previously saved battery file.
     pub fn load_sram(&mut self, data: &[u8]) {
         let ram = self.mmu.cartridge.ram_mut();

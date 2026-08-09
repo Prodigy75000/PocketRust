@@ -1019,6 +1019,11 @@ impl Cartridge {
     }
 
     /// The raw cartridge RAM, for battery-save persistence.
+    /// The full ROM image as loaded, banks end to end.
+    pub fn rom(&self) -> &[u8] {
+        &self.rom
+    }
+
     pub fn ram(&self) -> &[u8] {
         &self.ram
     }

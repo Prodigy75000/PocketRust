@@ -30,7 +30,7 @@ pub struct Mmu {
     pub cgb: bool,
     pub(crate) wram: [u8; 0x8000], // 8 banks of 4 KiB
     wram_bank: usize,   // 1..7 selects the 0xD000 region
-    hram: [u8; 0x7F],
+    pub(crate) hram: [u8; 0x7F],
 
     /// Interrupt Flag (0xFF0F): a pending interrupt request.
     pub interrupt_flag: u8,
