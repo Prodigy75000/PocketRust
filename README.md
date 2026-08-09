@@ -20,6 +20,7 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and networked play over the libretro netpacket interface (`pocketrust-link-4`) |
 | Networked link | ✅ sequenced paired exchange, sub-frame polling, retransmit; byte-perfect through 1-in-3 packet loss |
+| Memory map | ✅ full descriptor table (work RAM, high RAM, VRAM, OAM, ROM bank 0, cart RAM, CGB banks 2-7) plus the legacy SYSTEM_RAM / SAVE_RAM ids, so achievements, cheats and RAM watch all address the core |
 
 Compatibility: **4577 of 4794** GB / GBC ROMs (95.5%) boot and render in a
 headless smoke test of a large No-Intro-style set. The remaining misses are a
