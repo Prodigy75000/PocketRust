@@ -203,18 +203,18 @@ dependencies = [
 
 [[package]]
 name = "gb-core"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "gb-libretro"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "gb-core",
 ]
 
 [[package]]
 name = "gb-runner"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "gb-core",
  "minifb",

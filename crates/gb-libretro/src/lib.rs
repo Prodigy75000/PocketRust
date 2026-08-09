@@ -88,8 +88,17 @@ const RETRO_DEVICE_ID_JOYPAD_LEFT: u32 = 6;
 const RETRO_DEVICE_ID_JOYPAD_RIGHT: u32 = 7;
 const RETRO_DEVICE_ID_JOYPAD_A: u32 = 8;
 
-const RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS: u32 = 35;
-const RETRO_ENVIRONMENT_SET_MEMORY_MAPS: u32 = 36;
+/// Some environment ids carry this bit. It is part of the id, not a modifier:
+/// send the bare number and the host does not recognise the command at all.
+/// Worse, the bare number is usually somebody else's command. 35 without the
+/// bit is `SET_CONTROLLER_INFO`, which takes an array of port descriptors, so
+/// announcing achievement support with a plain 35 hands a host a `bool` where it
+/// expects that array and it walks off the end of it. That is exactly what
+/// crashed the app on the first build of this: the host logged
+/// "SET_CONTROLLER_INFO port 0:" and then took a SIGSEGV.
+const RETRO_ENVIRONMENT_EXPERIMENTAL: u32 = 0x10000;
+const RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS: u32 = 42 | RETRO_ENVIRONMENT_EXPERIMENTAL;
+const RETRO_ENVIRONMENT_SET_MEMORY_MAPS: u32 = 36 | RETRO_ENVIRONMENT_EXPERIMENTAL;
 
 const RETRO_MEMDESC_CONST: u64 = 1 << 0;
 const RETRO_MEMDESC_SYSTEM_RAM: u64 = 1 << 2;
@@ -178,7 +187,7 @@ pub unsafe extern "C" fn retro_get_system_info(info: *mut retro_system_info) {
         return;
     }
     (*info).library_name = c"RustGameBoy".as_ptr();
-    (*info).library_version = c"0.2.2".as_ptr();
+    (*info).library_version = c"0.2.3".as_ptr();
     (*info).valid_extensions = c"gb|gbc".as_ptr();
     (*info).need_fullpath = false;
     (*info).block_extract = false;
@@ -606,6 +615,25 @@ mod map_tests {
 
     fn find(descs: &[RetroMemoryDescriptor], start: usize) -> Option<&RetroMemoryDescriptor> {
         descs.iter().find(|d| d.start == start)
+    }
+
+    /// The EXPERIMENTAL bit is part of these ids, not a decoration. Sending the
+    /// bare number is not a no-op that a host politely ignores: 35 on its own is
+    /// `SET_CONTROLLER_INFO`, which expects an array of port descriptors, so
+    /// announcing achievement support with a plain 35 hands the host a `bool`
+    /// where it expects that array. That crashed the app on the first build of
+    /// the memory map, and neither the type system nor a headless harness can
+    /// catch it, because the harness is written from the same constant. The wire
+    /// values are pinned here so they are checked against the spec and not
+    /// against my own copy of the mistake.
+    #[test]
+    fn experimental_env_ids_carry_the_bit() {
+        assert_eq!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 0x1_0024);
+        assert_eq!(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, 0x1_002A);
+        assert_ne!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 36);
+        assert_ne!(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, 42);
+        // 35 is SET_CONTROLLER_INFO. Never send it from here.
+        assert_ne!(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, 35);
     }
 
     /// The Game Boy Color's extended work RAM starts at **bank 2**, because bank
