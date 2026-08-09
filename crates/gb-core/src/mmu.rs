@@ -28,7 +28,7 @@ pub struct Mmu {
     pub joypad: Joypad,
 
     pub cgb: bool,
-    wram: [u8; 0x8000], // 8 banks of 4 KiB
+    pub(crate) wram: [u8; 0x8000], // 8 banks of 4 KiB
     wram_bank: usize,   // 1..7 selects the 0xD000 region
     hram: [u8; 0x7F],
 

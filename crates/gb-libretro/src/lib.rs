@@ -89,6 +89,11 @@ const RETRO_DEVICE_ID_JOYPAD_RIGHT: u32 = 7;
 const RETRO_DEVICE_ID_JOYPAD_A: u32 = 8;
 
 const RETRO_MEMORY_SAVE_RAM: u32 = 0;
+const RETRO_MEMORY_SYSTEM_RAM: u32 = 2;
+
+/// Work RAM a monochrome cartridge can see: banks 0 and 1 only. A Game Boy
+/// Color game banks all eight, so it gets the whole 32 KiB.
+const DMG_WRAM_LEN: usize = 0x2000;
 
 // --- Core state ---------------------------------------------------------------
 
@@ -447,29 +452,62 @@ pub extern "C" fn retro_run() {
     });
 }
 
-// --- Save RAM (battery) exposure ---------------------------------------------
+// --- Guest memory exposure ----------------------------------------------------
+//
+// Two regions, and they are read by different things. SAVE_RAM is the battery,
+// which the front-end persists to `.srm`. SYSTEM_RAM is work RAM, which nothing
+// persists but which anything reading guest state needs: RetroAchievements,
+// cheats, RAM watch.
+//
+// Serving only SAVE_RAM used to strand achievements. rcheevos builds its region
+// table from these two ids, and a cartridge with no battery (Super Mario Land,
+// Tetris, Kirby's Dream Land) answered null to both, leaving it with zero
+// regions and every achievement address unvalidatable. Trophy Hub's host then
+// sat on "waiting for core memory map..." forever, since it defers the load
+// until either this succeeds or SET_MEMORY_MAPS fires, and we never published
+// a map either. Games *with* a battery resolved one region and wired up fine,
+// which is what made it look intermittent rather than simply missing.
 
 #[no_mangle]
 pub extern "C" fn retro_get_memory_data(id: u32) -> *mut c_void {
-    if id != RETRO_MEMORY_SAVE_RAM {
-        return ptr::null_mut();
-    }
-    with_state(|s| match &s.gb {
-        Some(gb) if gb.has_battery() && !gb.sram().is_empty() => {
-            gb.sram().as_ptr() as *mut c_void
+    with_state(|s| {
+        let gb = match &s.gb {
+            Some(gb) => gb,
+            None => return ptr::null_mut(),
+        };
+        match id {
+            RETRO_MEMORY_SAVE_RAM if gb.has_battery() && !gb.sram().is_empty() => {
+                gb.sram().as_ptr() as *mut c_void
+            }
+            RETRO_MEMORY_SYSTEM_RAM => gb.wram().as_ptr() as *mut c_void,
+            _ => ptr::null_mut(),
         }
-        _ => ptr::null_mut(),
     })
 }
 
 #[no_mangle]
 pub extern "C" fn retro_get_memory_size(id: u32) -> usize {
-    if id != RETRO_MEMORY_SAVE_RAM {
-        return 0;
-    }
-    with_state(|s| match &s.gb {
-        Some(gb) if gb.has_battery() => gb.sram().len(),
-        _ => 0,
+    with_state(|s| {
+        let gb = match &s.gb {
+            Some(gb) => gb,
+            None => return 0,
+        };
+        match id {
+            RETRO_MEMORY_SAVE_RAM if gb.has_battery() => gb.sram().len(),
+            // A DMG game only ever addresses banks 0 and 1. Reporting all 32 KiB
+            // for it would hand the front-end six banks the game cannot reach,
+            // and shift nothing, but rcheevos sizes the Game Boy region at 8 KiB
+            // and the Game Boy Color one at 32 KiB, so answer with the size that
+            // matches the machine actually running.
+            RETRO_MEMORY_SYSTEM_RAM => {
+                if gb.is_cgb() {
+                    gb.wram().len()
+                } else {
+                    DMG_WRAM_LEN
+                }
+            }
+            _ => 0,
+        }
     })
 }
 
