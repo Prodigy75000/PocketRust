@@ -14,18 +14,14 @@ T_SOLID3  = $42
 T_CURSOR  = $43
 T_ORB     = $44
 T_GEM     = $45
-T_NOTE    = $46
-T_BRICK_A = $47
-T_BRICK_B = $48
-T_STAR    = $49
-T_CLOUD   = $4a
-T_SWATCH  = $4b
-T_BAR0    = $4c
-T_BAR1    = $4d
-T_BAR2    = $4e
-T_BAR3    = $4f
-T_KEY_OFF = $50
-T_KEY_ON  = $51
+T_BRICK_A = $46
+T_BRICK_B = $47
+T_STAR    = $48
+T_CLOUD   = $49
+T_SWATCH  = $4a
+T_BAR0    = $4b      ; and $4c, $4d, $4e: four heights, T_BAR0 plus the level
+T_KEY_OFF = $4f
+T_KEY_ON  = $50
 
 ; ---- screen scripts ------------------------------------------------------
 ; Each run is a destination address, a length, then that many tile indices.

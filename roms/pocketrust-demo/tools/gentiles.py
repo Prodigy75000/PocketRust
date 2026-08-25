@@ -120,11 +120,6 @@ GRAPHICS = [
         "...33...", "..3113..", ".311223.", "31122223",
         "31222223", ".322223.", "..3223..", "...33...",
     ]),
-    # A quaver, for the audio screen's channel list.
-    ("tile_note", [
-        "...3333.", "...3..3.", "...3..3.", "...3....",
-        "...3....", ".333....", ".333....", "..3.....",
-    ]),
     # The scrolling playfield: brick courses that alternate every row, so a
     # scroll that tears or wraps early shows up as a broken course.
     ("tile_brick_a", [

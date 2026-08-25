@@ -846,17 +846,6 @@ tiles_start:
 ...33...
 .endtile
 
-.tile tile_note
-...3333.
-...3..3.
-...3..3.
-...3....
-...3....
-.333....
-.333....
-..3.....
-.endtile
-
 .tile tile_brick_a
 33333333
 31111113
@@ -982,4 +971,4 @@ tiles_end:
 
 .assert chr_41 - tiles_start == ($41 - $20) * 16, "a tile was inserted into the font and shifted every index after it"
 .assert tile_solid1 - tiles_start == $40 * 16, "the graphics no longer start where the font ends"
-.assert tiles_end - tiles_start == 1312, "the tile set changed size"
+.assert tiles_end - tiles_start == 1296, "the tile set changed size"

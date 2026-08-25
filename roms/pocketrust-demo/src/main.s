@@ -118,7 +118,6 @@ wVBlankDone:   .res 1    ; set by the VBlank handler, cleared by the main loop
 wQueueLen:     .res 1    ; entries waiting in wQueue
 wFrame:        .res 2    ; frames since reset, low byte first
 wJoy:          .res 1    ; buttons held now
-wJoyPrev:      .res 1
 wJoyNew:       .res 1    ; buttons that went down this frame
 wRawDpad:      .res 1    ; the four lines as the direction selector reports them
 wRawBtn:       .res 1
@@ -129,7 +128,6 @@ wIsCgb:        .res 1
 wLcdc:         .res 1    ; what rendering_on turns the screen back on with
 
 wArrange:      .res 1    ; sprite screen: which of the four arrangements
-wBig:          .res 1    ; sprite screen: 8x16 objects
 wOamRot:       .res 1    ; sprite screen: which object owns the first OAM slot
 
 wScrollX:      .res 1    ; scroll screen: where the playfield has got to
@@ -144,6 +142,7 @@ wChanSel:      .res 1    ; audio screen: 0-3
 wMute:         .res 1    ; audio screen: one bit per channel
 wStep:         .res 1    ; audio screen: position in the sixteen-step pattern
 wTick:         .res 1    ; audio screen: frames until the next step
+wMeter:        .res 4    ; audio screen: how recently each channel was struck
 
 ; ---- interrupt vectors ---------------------------------------------------
 
@@ -533,7 +532,6 @@ sprites_enter:
   call draw_script
   xor a
   ld [wArrange], a
-  ld [wBig], a
   ld [wOamRot], a
   ret
 
@@ -565,9 +563,6 @@ sprites_tick:
   ld a, b
   and BTN_SELECT
   jr z, @nosel
-  ld a, [wBig]
-  xor 1
-  ld [wBig], a
   ld a, [wLcdc]
   xor LCDCF_BIG
   ld [wLcdc], a
@@ -1392,6 +1387,10 @@ audio_enter:
   ld [wMute], a
   ld [wStep], a
   ld [wTick], a
+  ld [wMeter], a
+  ld [wMeter + 1], a
+  ld [wMeter + 2], a
+  ld [wMeter + 3], a
   call apply_mute
   ret
 
@@ -1442,7 +1441,41 @@ audio_tick:
   ld [wTick], a
 @nostart:
   call music_advance
+  ; The meters fall a step every other frame, which empties one over six of the
+  ; eight frames a pattern step lasts. A muted channel is never struck, so its
+  ; meter falls to nothing and stays there.
+  ld a, [wFrame]
+  and 1
+  call z, decay_meters
   call audio_labels
+  ret
+
+decay_meters:
+  ld hl, wMeter
+  ld b, 4
+@one:
+  ld a, [hl]
+  or a
+  jr z, @next
+  dec a
+  ld [hl], a
+@next:
+  inc hl
+  dec b
+  jr nz, @one
+  ret
+
+; a = channel. It has just been struck, so its meter goes to full.
+set_meter:
+  push hl
+  push de
+  ld e, a
+  ld d, 0
+  ld hl, wMeter
+  add hl, de
+  ld [hl], 3
+  pop de
+  pop hl
   ret
 
 ; a = n, returns 1 << n for n in 0 to 7.
@@ -1472,6 +1505,25 @@ audio_labels:
   jr nz, @blank
   ld a, T_CURSOR
 @blank:
+  call queue_tile
+
+  ; ...its meter, in the column between the name and the state.
+  ld l, c
+  ld h, 0
+  ld de, wMeter
+  add hl, de
+  ld a, [hl]
+  add T_BAR0
+  ld b, a
+  ld a, c
+  add a
+  add 4
+  call row_address
+  ld hl, 12
+  add hl, de
+  ld d, h
+  ld e, l
+  ld a, b
   call queue_tile
 
   ; ...and its state, in the four columns the header labelled STATE.
@@ -1581,6 +1633,8 @@ trigger_pulse:
   ld a, [wMute]
   and e
   ret nz
+  ld a, b
+  call set_meter
   ld a, c
   call note_period       ; de = the eleven-bit period
   ld a, b
@@ -1605,6 +1659,8 @@ trigger_wave:
   ld a, [wMute]
   and %00000100
   ret nz
+  ld a, 2
+  call set_meter
   ld a, c
   call note_period
   ld a, e
@@ -1621,6 +1677,8 @@ trigger_noise:
   ld a, [wMute]
   and %00001000
   ret nz
+  ld a, 3
+  call set_meter
   ld a, b
   ldh [NR43], a
   ld a, %10000000
@@ -1812,7 +1870,6 @@ read_joypad:
   ldh [P1], a
 
   ld a, [wJoy]
-  ld [wJoyPrev], a
   cpl
   and c
   ld [wJoyNew], a
