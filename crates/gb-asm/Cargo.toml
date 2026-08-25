@@ -1,0 +1,16 @@
+[package]
+name = "gb-asm"
+version = "0.1.0"
+edition = "2021"
+description = "A small SM83 (Game Boy) assembler, used to build PocketRust's demo cartridge"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "gb_asm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gb-asm"
+path = "src/main.rs"
+
+[dependencies]

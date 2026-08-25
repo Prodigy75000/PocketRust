@@ -14,9 +14,14 @@
 /.cargo/config.toml
 
 # ROM images: ignore everywhere except the freely-distributable test ROMs
-# (Blargg + dmg/cgb-acid2) that the test suite needs.
+# (Blargg + dmg/cgb-acid2) that the test suite needs, and our own demo
+# cartridge, which is CC0 and is the whole point of roms/.
 *.gb
 *.gbc
 !tests/roms/**/*.gb
 !tests/roms/**/*.gbc
+!roms/pocketrust-demo/pocketrust-demo.gbc
 /dumps
+
+# The symbol listing is a build convenience, not a deliverable.
+*.sym

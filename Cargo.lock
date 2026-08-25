@@ -202,6 +202,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gb-asm"
+version = "0.1.0"
+
+[[package]]
 name = "gb-core"
 version = "0.2.3"
 

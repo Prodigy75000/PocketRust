@@ -20,6 +20,7 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and networked play over the libretro netpacket interface (`pocketrust-link-4`) |
 | Networked link | ✅ sequenced paired exchange, sub-frame polling, retransmit; byte-perfect through 1-in-3 packet loss |
+| Demo cartridge | ✅ an original, CC0 Game Boy Color cartridge in `roms/pocketrust-demo/`, built by our own assembler and reproducible byte for byte |
 | Memory map | ✅ full descriptor table (work RAM, high RAM, VRAM, OAM, ROM bank 0, cart RAM, CGB banks 2-7) plus the legacy SYSTEM_RAM / SAVE_RAM ids, so achievements, cheats and RAM watch all address the core |
 
 Compatibility: **4577 of 4794** GB / GBC ROMs (95.5%) boot and render in a
@@ -40,11 +41,34 @@ crates/
   gb-core/      the emulator library (no I/O deps)
     src/cpu/    registers, decoder, execution
     src/{mmu, ppu, apu, timer, joypad, cartridge, serial}.rs
-    tests/      Blargg + save-state + link-cable integration tests
+    tests/      Blargg + save-state + link-cable + demo-cart integration tests
   gb-runner/    minifb windowed frontend + headless compatibility smoke tester
   gb-libretro/  libretro core (builds the .so for RetroArch / libretro front-ends)
+  gb-asm/       a dependency-free SM83 assembler, used to build the demo cart
+roms/           the demo cartridge: source, ROM, licence, screenshots
 tests/roms/     Blargg + acid2 test ROMs
 ```
+
+## The demo cartridge
+
+`roms/pocketrust-demo/` is an original Game Boy Color cartridge written for this
+project and dedicated to the public domain under CC0 1.0, so it can be handed to
+anyone, bundled with anything, and used to demonstrate the core without a
+licensing question attached. It is five screens, each loading one part of the
+machine hard enough to see whether it is right: the ten-objects-per-scanline
+limit, a raster split, the 15-bit palette, all four sound channels, and the
+joypad matrix.
+
+```sh
+scripts/build-demo-rom.sh                        # assemble it from source
+cargo test -p gb-asm --test demo_rom_reproduces  # prove the ROM is that source
+cargo test -p gb-core --test demo_cart           # drive the core with it
+cargo run --release -p gb-runner -- roms/pocketrust-demo/pocketrust-demo.gbc
+```
+
+The chain from source to `.gbc` is entirely inside this repository: the
+assembler is `crates/gb-asm/` and has no dependencies at all. See
+[`roms/pocketrust-demo/README.md`](roms/pocketrust-demo/README.md).
 
 ## Running
 

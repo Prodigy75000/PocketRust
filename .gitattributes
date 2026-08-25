@@ -1,0 +1,12 @@
+# The demo cartridge is a binary. Without this a Windows checkout can rewrite
+# bytes inside it that happen to look like line endings, and quietly corrupt a
+# ROM that the reproducibility test then reports as a source drift.
+*.gbc binary
+*.gb  binary
+*.bin binary
+*.png binary
+*.state binary
+
+# Assembly source is text and must round-trip through any checkout unchanged,
+# because the ROM is compared byte for byte against what it assembles to.
+*.s text eol=lf

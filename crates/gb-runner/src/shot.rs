@@ -1,9 +1,20 @@
 //! Headless screenshot tool: run a ROM for N frames, then write the framebuffer
 //! to a PNG. Handy for eyeballing the PPU and for regression baselines.
 //!
-//!   cargo run --release -p gb-runner --bin shot -- <rom.gb> <frames> <out.png>
+//!   cargo run --release -p gb-runner --bin shot -- <rom.gb> <frames> <out.png> [keys]
+//!
+//! `keys` is an optional comma-separated script, played before the N frames, so
+//! that a screenshot of something behind a menu can be taken again later without
+//! anyone having to remember which buttons they pressed:
+//!
+//!   a b up down left right start select   tap it (six frames down, six up)
+//!   +a                                    hold it down and leave it there
+//!   -a                                    let it go
+//!   w30                                   run thirty frames
+//!
+//!   ... -- demo.gbc 60 shot.png down,down,a,w120
 
-use gb_core::{GameBoy, SCREEN_H, SCREEN_W};
+use gb_core::{Button, GameBoy, SCREEN_H, SCREEN_W};
 use std::fs::File;
 use std::io::BufWriter;
 
@@ -12,6 +23,7 @@ fn main() {
     let rom_path = args.next().expect("usage: shot <rom.gb> <frames> <out.png>");
     let frames: u32 = args.next().map(|s| s.parse().unwrap()).unwrap_or(600);
     let out = args.next().unwrap_or_else(|| "shot.png".into());
+    let keys = args.next().unwrap_or_default();
 
     let rom = std::fs::read(&rom_path).expect("failed to read ROM");
     let mut gb = GameBoy::new(rom);
@@ -21,6 +33,9 @@ fn main() {
         _ => {}
     }
     println!("Loaded '{}', running {frames} frames...", gb.title());
+    if !keys.is_empty() {
+        play(&mut gb, &keys);
+    }
 
     let debug = std::env::var("GBDEBUG").is_ok();
     let mut serial = String::new();
@@ -78,4 +93,53 @@ fn main() {
         .write_image_data(&rgb)
         .unwrap();
     println!("Wrote {out}");
+}
+
+/// Play an input script. Anything it does not recognise is a hard error rather
+/// than a silent skip, because a typo in a screenshot recipe would otherwise
+/// produce a plausible picture of the wrong screen.
+fn play(gb: &mut GameBoy, script: &str) {
+    for token in script.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(n) = token.strip_prefix('w') {
+            let n: u32 = n.parse().unwrap_or_else(|_| panic!("bad wait {token:?}"));
+            for _ in 0..n {
+                gb.step_frame();
+            }
+            continue;
+        }
+        let (name, action) = match token.as_bytes()[0] {
+            b'+' => (&token[1..], 1),
+            b'-' => (&token[1..], 2),
+            _ => (token, 0),
+        };
+        let button = match name {
+            "a" => Button::A,
+            "b" => Button::B,
+            "up" => Button::Up,
+            "down" => Button::Down,
+            "left" => Button::Left,
+            "right" => Button::Right,
+            "start" => Button::Start,
+            "select" => Button::Select,
+            other => panic!("no such button {other:?}"),
+        };
+        match action {
+            1 => gb.set_button(button, true),
+            2 => gb.set_button(button, false),
+            _ => {
+                gb.set_button(button, true);
+                for _ in 0..6 {
+                    gb.step_frame();
+                }
+                gb.set_button(button, false);
+                for _ in 0..6 {
+                    gb.step_frame();
+                }
+            }
+        }
+    }
 }
