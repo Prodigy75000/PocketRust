@@ -60,13 +60,24 @@ playable for a player who cannot tell red from green.
 160 by 144, divided exactly, no margins anywhere:
 
 ```
-rows 0-1    status bar            160 x 16
-rows 2-17   the field, 10 x 8 cells of 16 x 16   160 x 128
+rows 0-1    status bar                        160 x 16
+rows 2-17   the field, 20 x 16 cells of 8x8   160 x 128
 ```
 
-A cell `(cx, cy)` is the 2 by 2 block of tiles at map row `2 + cy*2`, column
-`cx*2`. Towers are background tiles, so a full board of towers costs no objects
-at all. Creeps and the build cursor are the only objects on screen.
+A cell `(cx, cy)` is the single tile at map row `2 + cy`, column `cx`. Towers are
+background tiles, so a full board of towers costs no objects at all. Creeps and
+the build cursor are the only objects on screen.
+
+**This started at 10 by 8 cells of 16x16 and moved.** The reason is the route
+length: the best switchback that fits a 10 by 8 board is 36 cells, and on an 8
+pixel grid it is 134. A tower defence lives on how long a creep spends inside a
+tower's range, so nearly quadrupling the route changes what the game is, and 186
+buildable cells instead of 44 is the difference between placing towers and
+merely having somewhere to put them.
+
+The cost is paid by the art, and it has not been paid yet. See the open question
+about tower silhouettes in the README: eight background palettes, five already
+spent, and ten tower types to tell apart.
 
 ## A map is a picture
 
@@ -76,20 +87,33 @@ afford to throw a map away.
 
 ```
 map_1:
-  .str "S+++++++.."
-  .str "......+..."
-  .str "..++++++.."
-  .str "..+......."
-  .str "..+++++++."
-  .str "........+."
-  .str ".+++++++.."
-  .str ".E........"
+  .str "...................."
+  .str "S+++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".+++++++++++++++++++"
+  .str "...................."
+  .str "...................."
 ```
 
 `S` is where creeps enter, `E` is where they leave and cost you a life, `+` is
-path, `.` is ground you can build on. Ten characters by eight rows, and `.str`
-already emits ASCII minus $20, so the map is an index into a lookup table
+path, `.` is ground you can build on. Twenty characters by sixteen rows, and
+`.str` already emits ASCII minus $20, so the map is an index into a lookup table
 without anything being packed by hand.
+
+The shape is a switchback: no branches, one long winding corridor, in at the
+left edge and out at the right. That is the trick Element TD's map is really
+doing, and it is what maximises how much of the route sits inside a tower's
+range on a board this small. 134 cells of route, 186 to build on.
 
 **The order of the path is derived, not written.** At load the cartridge walks
 from `S`, following path cells, and writes an ordered waypoint list. Nobody
@@ -107,7 +131,7 @@ A creep is a position on the path and nothing else, so it is cheap:
 
 ```
 path_index  which waypoint it has reached      1 byte
-sub         0-255 across the 16 pixels to the next one
+sub         0-255 across the 8 pixels to the next one
 hp          2 bytes
 kind        1 byte
 slow        frames of slow remaining           1 byte
@@ -115,8 +139,9 @@ slow        frames of slow remaining           1 byte
 
 `sub += speed` each frame; the carry out of that addition is exactly
 `path_index += 1`, so movement is eight-bit arithmetic with no special case at a
-corner. Pixel position is the waypoint's cell centre plus `sub >> 4` along the
-direction to the next waypoint.
+corner. Pixel position is the waypoint's cell plus `sub >> 5` along the
+direction to the next waypoint, which the walk recorded when it had the
+columns and rows in hand.
 
 Sixteen creeps maximum. The hardware draws ten objects per scanline and drops
 the rest, so the object buffer is rotated every frame the way the demo cart's
@@ -127,7 +152,7 @@ a lie about where the creeps are.
 ## Towers
 
 Up to twenty-four, each four bytes: cell, kind, level, cooldown. A parallel
-80-byte cell map answers "what is on this cell" for the cursor in one index.
+320-byte cell map answers "what is on this cell" for the cursor in one index.
 
 Targeting is "the creep furthest along the path that is in range", which is the
 tower defence convention and the one that makes the player's placement read

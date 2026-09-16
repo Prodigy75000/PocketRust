@@ -24,9 +24,9 @@ d-pad. Four pure towers and the six pairs between them.
 
 ## What works today
 
-- The board: ten cells by eight, each 16 by 16, under a two-tile status bar.
-  160 by 16 plus 160 by 128 is 160 by 144 exactly, so there is no margin
-  anywhere to get wrong.
+- The board: twenty cells by sixteen, one 8x8 tile each, under a two-tile
+  status bar. 160 by 16 plus 160 by 128 is 160 by 144 exactly, so there is no
+  margin anywhere to get wrong.
 - A map is a picture in `src/data.s`, ten characters by eight rows, and the
   route creeps walk is **derived from it** rather than written beside it.
 - Creeps that walk that route, leak at the exit, and cost you a life when they
@@ -42,6 +42,23 @@ route is stored as waypoints rather than as pixel coordinates.
 
 Towers, the element draft, the economy, a real wave table, sound, and the link
 cable. In roughly that order.
+
+### The open question towers run into
+
+A Game Boy Color has **eight background palettes**, and this cartridge already
+spends five of them on the interface, ground, path, spawn and exit. Ten tower
+types therefore cannot each have their own colour, whatever size they are drawn
+at, so their silhouettes have to carry most of the difference.
+
+At one 8x8 tile per cell that is a hard ask. Ten readable silhouettes in
+sixty-four pixels, still readable on a monochrome Game Boy, is probably four to
+six rather than ten.
+
+The likely answer is that a tower occupies **2 by 2 cells** while the path stays
+one cell wide, which is also what the reference games look like: four tiles of
+silhouette, a coarser build grid to move a cursor around, and a cell is
+buildable only when all four of its quarters are. That is a decision for when
+towers get built, not before.
 
 ## The route is derived, and that is checked three ways
 
@@ -63,13 +80,20 @@ neither is visible by looking at the map. So:
    is a second implementation in another language, and a second implementation
    agreeing with itself is not the claim; the claim is that the code on the
    cartridge gets the same answer.
-3. Counting it by hand off the picture, which is where the number 36 came from.
+3. Counting it by hand off the picture.
 
-All three say map 1 is a 36 cell route, so the number in the test is an absolute
-one rather than something derived from the route it is checking. The test also
-asserts that both ends are on the top edge, because a map that quietly grew an
-exit on another edge would pass every other check and simply be a different
-game.
+Both say map 1 is a 134 cell route, so the number in the test is an absolute one
+rather than something derived from the route it is checking. The test also
+asserts the spawn is on the left edge and the exit on the right, because a map
+that quietly grew its ends somewhere else would pass every other check and
+simply be a different game.
+
+This is not hypothetical. The first draft of this switchback had its top
+corridor ending one column short of the connector below it, so the two were
+diagonal and never met. Every other property held: no forks, no dead ends, a
+perfectly well formed route. It was simply a route that stopped a fifth of the
+way along, and creeps would have walked to the gap and stood there. `checkmap.py`
+named both cells in one line.
 
 The addresses those tests read come from the committed `.sym` file, not from
 constants, because work RAM moves every time the game grows a variable and a
@@ -103,32 +127,36 @@ cargo test -p gb-core --test hold_the_line
 
 ```
 map_1:
-  .str "S........E"
-  .str "+..++++..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "++++..++++"
+  .str "...................."
+  .str "S+++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".+++++++++++++++++++"
+  .str "...................."
+  .str "...................."
 ```
 
 `S` is where creeps enter, `E` is where they leave and it costs you a life, `+`
 is path, `.` is ground you can build on.
 
-Creeps go in at the top and come out at the top, the way Element TD does, and
-that one constraint decides the whole shape. It rules out a spiral, because a
-spiral has to finish somewhere in the middle and there is no way back out to the
-rim from there without crossing an arm it already drew. What it leaves is a
-comb: four corridors joined alternately at the bottom and the top.
+A switchback, which is the trick Element TD's map is really doing. No branches,
+just one long winding corridor that maximises how much of the route sits inside
+a tower's range on a small board. Seven corridors, joined alternately at the
+right and the left, in at the left edge and out at the right. **134 cells of
+route and 186 to build on**, against 36 and 44 for the 16-pixel board this
+replaced, which is the whole reason for the change.
 
-The corridors are three columns apart rather than two, and that is the part
-worth knowing. Two apart also works and is a cell shorter, but it leaves the
-right third of the board too far from anything to build on, and a fifth corridor
-cannot be added to use it, because the route would then finish at the bottom of
-the board. Three apart uses the full width and wastes nothing, so **every dark
-cell on the board has a corridor on either side of it** and a tower placed
-anywhere covers two passes of the route.
+Every gap row has a corridor above it and below it, so a tower anywhere covers
+two passes.
 
 Nothing is packed, indexed or compiled by hand. The assembler's `.str` directive
 already emits ASCII minus $20, which is exactly an index into a 64-byte lookup

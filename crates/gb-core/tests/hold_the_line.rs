@@ -23,8 +23,9 @@ use gb_core::{Button, GameBoy};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-const GRID_W: u8 = 10;
-const GRID_H: u8 = 8;
+const GRID_W: u8 = 20;
+const GRID_H: u8 = 16;
+const GRID_CELLS: usize = GRID_W as usize * GRID_H as usize;
 
 /// Cell kinds, as `src/main.s` numbers them.
 const CELL_GROUND: u8 = 0;
@@ -72,8 +73,8 @@ fn boot() -> (GameBoy, HashMap<String, u16>) {
     let path = rom_dir().join("hold-the-line.gbc");
     let rom = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let mut gb = GameBoy::new(rom);
-    // Reset clears 8 KB of work RAM and copies the tile set, which takes longer
-    // than one frame. By 120 the board is drawn and the route is derived.
+    // Reset clears 8 KB of work RAM, copies the tile set and draws 320 cells,
+    // which takes longer than one frame. By 120 the route is derived.
     run(&mut gb, 120);
     (gb, symbols())
 }
@@ -96,18 +97,24 @@ fn read(gb: &GameBoy, addr: u16, len: usize) -> Vec<u8> {
 }
 
 /// The board as the cartridge decoded it, and the route as it derived it.
-fn board_and_route(gb: &GameBoy, syms: &HashMap<String, u16>) -> (Vec<u8>, Vec<u8>) {
-    let cells = read(gb, sym(syms, "wCells"), (GRID_W * GRID_H) as usize);
+///
+/// The route comes back as (column, row) pairs, which is how the cartridge
+/// stores it: a 20 by 16 board has 320 cells, so a cell index would not fit in
+/// a byte, and a column and a row are what drawing a creep wants anyway.
+fn board_and_route(gb: &GameBoy, syms: &HashMap<String, u16>) -> (Vec<u8>, Vec<(u8, u8)>) {
+    let cells = read(gb, sym(syms, "wCells"), GRID_CELLS);
     let len = gb.peek(sym(syms, "wPathLen")) as usize;
-    let route = read(gb, sym(syms, "wPath"), len);
-    (cells, route)
+    let cols = read(gb, sym(syms, "wPathCol"), len);
+    let rows = read(gb, sym(syms, "wPathRow"), len);
+    (cells, cols.into_iter().zip(rows).collect())
 }
 
-fn col(idx: u8) -> u8 {
-    idx % GRID_W
+fn at(cells: &[u8], (c, r): (u8, u8)) -> u8 {
+    cells[r as usize * GRID_W as usize + c as usize]
 }
-fn row(idx: u8) -> u8 {
-    idx / GRID_W
+
+fn walkable(k: u8) -> bool {
+    matches!(k, CELL_PATH | CELL_SPAWN | CELL_EXIT)
 }
 
 #[test]
@@ -115,7 +122,7 @@ fn the_picture_decodes_into_the_board_it_draws() {
     let (gb, syms) = boot();
     let (cells, _) = board_and_route(&gb, &syms);
 
-    assert_eq!(cells.len(), 80, "the board is ten cells by eight");
+    assert_eq!(cells.len(), 320, "the board is twenty cells by sixteen");
     for (i, &k) in cells.iter().enumerate() {
         assert!(
             k <= CELL_EXIT,
@@ -134,7 +141,7 @@ fn the_picture_decodes_into_the_board_it_draws() {
         "exactly one exit"
     );
     assert!(
-        cells.iter().filter(|&&k| k == CELL_GROUND).count() > 20,
+        cells.iter().filter(|&&k| k == CELL_GROUND).count() > 100,
         "a map with nowhere to build is not a tower defence"
     );
 }
@@ -144,8 +151,6 @@ fn the_cartridge_derives_the_route_from_the_picture() {
     let (gb, syms) = boot();
     let (cells, route) = board_and_route(&gb, &syms);
 
-    let walkable = |k: u8| matches!(k, CELL_PATH | CELL_SPAWN | CELL_EXIT);
-
     assert!(
         !route.is_empty(),
         "the cartridge derived an empty route. It could not find a spawn, or the \
@@ -154,86 +159,83 @@ fn the_cartridge_derives_the_route_from_the_picture() {
 
     // The two ends are the two ends.
     assert_eq!(
-        cells[route[0] as usize], CELL_SPAWN,
+        at(&cells, route[0]),
+        CELL_SPAWN,
         "the route starts somewhere that is not the spawn"
     );
     assert_eq!(
-        cells[*route.last().unwrap() as usize],
+        at(&cells, *route.last().unwrap()),
         CELL_EXIT,
         "the route stops somewhere that is not the exit. A walk that ran out of \
          room, or one that got stuck, ends exactly like this."
     );
 
-    // Every step is one cell, orthogonally. This is what catches a walk that
-    // wrapped round a row edge: index 9 and index 10 differ by one and are on
-    // opposite sides of the board.
-    for pair in route.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        let dx = col(a).abs_diff(col(b));
-        let dy = row(a).abs_diff(row(b));
-        assert_eq!(
-            (dx, dy),
-            (dx.min(1), dy.min(1)),
-            "the route steps from cell {a} ({},{}) to {b} ({},{}), which is not \
-             one cell away",
-            col(a),
-            row(a),
-            col(b),
-            row(b)
+    // Every waypoint is on the board at all. The walk works in columns and rows
+    // now, and a row of 255 would index happily into work RAM and look plausible.
+    for &(c, r) in &route {
+        assert!(
+            c < GRID_W && r < GRID_H,
+            "the route visits ({c},{r}), which is off a {GRID_W} by {GRID_H} board"
         );
+    }
+
+    // Every step is exactly one cell, orthogonally.
+    for pair in route.windows(2) {
+        let ((c0, r0), (c1, r1)) = (pair[0], pair[1]);
+        let d = c0.abs_diff(c1) + r0.abs_diff(r1);
         assert_eq!(
-            dx + dy,
-            1,
-            "the route steps from cell {a} to {b}, which is diagonal or stationary"
+            d, 1,
+            "the route steps from ({c0},{r0}) to ({c1},{r1}), which is diagonal, \
+             stationary, or a jump"
         );
     }
 
     // It never doubles back, and it never visits anything twice.
-    let mut seen = vec![false; 80];
-    for &idx in &route {
+    let mut seen = vec![false; GRID_CELLS];
+    for &p in &route {
         assert!(
-            walkable(cells[idx as usize]),
-            "the route walks over cell {idx}, which is ground"
+            walkable(at(&cells, p)),
+            "the route walks over {p:?}, which is ground"
         );
+        let i = p.1 as usize * GRID_W as usize + p.0 as usize;
         assert!(
-            !seen[idx as usize],
-            "the route visits cell {idx} twice, so the walk turned round"
+            !seen[i],
+            "the route visits {p:?} twice, so the walk turned round"
         );
-        seen[idx as usize] = true;
+        seen[i] = true;
     }
 
     // And it leaves nothing behind: a path cell that is not on the route is a
-    // second loop somewhere on the board that no creep would ever reach.
-    let stranded: Vec<usize> = (0..80)
+    // second loop somewhere on the board that no creep would ever reach. This is
+    // the one that catches a switchback whose corridor and its connector are on
+    // different columns and therefore never actually meet, which is exactly the
+    // defect the first draft of this map had.
+    let stranded: Vec<(usize, usize)> = (0..GRID_CELLS)
         .filter(|&i| walkable(cells[i]) && !seen[i])
+        .map(|i| (i % GRID_W as usize, i / GRID_W as usize))
         .collect();
     assert!(
         stranded.is_empty(),
-        "cells {stranded:?} are path but are not on the route"
+        "{} cells are path but are not on the route, starting at {:?}. The route \
+         is broken in two somewhere.",
+        stranded.len(),
+        &stranded[..stranded.len().min(4)]
     );
 
-    // Map 1's comb, counted off the picture in data.s by hand and by
-    // tools/checkmap.py independently. Stated as an absolute number rather than
-    // as a length derived from the route, which would agree with anything.
-    assert_eq!(route.len(), 36, "map 1 is a 36 cell route");
+    // Map 1's switchback, counted off the picture in data.s by tools/checkmap.py
+    // independently. Stated as an absolute number rather than as a length
+    // derived from the route, which would agree with anything.
+    assert_eq!(route.len(), 134, "map 1 is a 134 cell route");
 
-    // Creeps go in at the top and come out at the top, which is the constraint
-    // the whole map shape follows from. It is worth asserting because a map that
-    // quietly grew an exit on another edge would still pass every check above:
-    // the route would be perfectly well formed and the game would be a
-    // different game.
-    assert_eq!(row(route[0]), 0, "the spawn is not on the top edge");
+    // Creeps come in at the left edge and leave at the right, which is what the
+    // switchback's odd number of corridors buys. A map that quietly grew its
+    // ends somewhere else would pass every check above and simply be a different
+    // game.
+    assert_eq!(route[0].0, 0, "the spawn is not on the left edge");
     assert_eq!(
-        row(*route.last().unwrap()),
-        0,
-        "the exit is not on the top edge"
-    );
-
-    // And the two ends are not the same place, which is the degenerate map the
-    // rule above would otherwise allow.
-    assert!(
-        col(route[0]).abs_diff(col(*route.last().unwrap())) > 4,
-        "the two ends are too close together for the route between them to matter"
+        route.last().unwrap().0,
+        GRID_W - 1,
+        "the exit is not on the right edge"
     );
 }
 
@@ -250,7 +252,7 @@ fn the_build_cursor_moves_and_stops_at_the_edges() {
 
     // Far more presses than the board is wide, to prove the clamp is a clamp
     // and not a wrap. A wrapped cursor would come back round to a low number.
-    for _ in 0..20 {
+    for _ in 0..30 {
         tap(&mut gb, Button::Right);
         tap(&mut gb, Button::Down);
     }
@@ -260,7 +262,7 @@ fn the_build_cursor_moves_and_stops_at_the_edges() {
         "the cursor should stop on the last cell, not wrap or run off the board"
     );
 
-    for _ in 0..20 {
+    for _ in 0..30 {
         tap(&mut gb, Button::Left);
         tap(&mut gb, Button::Up);
     }
@@ -268,5 +270,40 @@ fn the_build_cursor_moves_and_stops_at_the_edges() {
         (gb.peek(cx), gb.peek(cy)),
         (0, 0),
         "and stop on the first one going the other way"
+    );
+}
+
+#[test]
+fn creeps_walk_the_route_and_cost_a_life_when_they_get_out() {
+    let (mut gb, syms) = boot();
+    let lives = sym(&syms, "wLives");
+    let alive = sym(&syms, "wCreepAlive");
+    let idx = sym(&syms, "wCreepIdx");
+
+    let start = gb.peek(lives);
+    assert!(start > 0, "the game starts with lives");
+
+    run(&mut gb, 400);
+    let on_board = (0..16).filter(|i| gb.peek(alive + i) != 0).count();
+    assert!(on_board > 0, "no creep reached the board at all");
+
+    // They are spread along the route rather than piled on the spawn, which is
+    // what a broken walk or a speed of zero would look like from here.
+    let furthest = (0..16)
+        .filter(|i| gb.peek(alive + i) != 0)
+        .map(|i| gb.peek(idx + i))
+        .max()
+        .unwrap();
+    assert!(
+        furthest > 10,
+        "the furthest creep has only reached waypoint {furthest} after 400 frames"
+    );
+
+    // And eventually one gets out, which has to cost something.
+    run(&mut gb, 2600);
+    assert!(
+        gb.peek(lives) < start,
+        "creeps have had 3000 frames to cross a 134 cell route and lives are \
+         still {start}, so nothing is leaking at the exit"
     );
 }

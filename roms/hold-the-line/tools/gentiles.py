@@ -91,40 +91,25 @@ FONT = {
 # within the tile's palette; a dot is colour 0.
 
 GRAPHICS = [
-    # Ground: a cell you can build on. The field is colour 0 and each of the
-    # four tiles carries a tick in its own OUTER corner, so a 2x2 cell is marked
-    # at its four corners and the board reads as cells rather than as an
-    # undifferentiated 8-pixel lattice. That is the whole reason this is four
-    # tiles and not one.
-    ("tile_ground_tl", [
-        "11......", "1.......", "........", "........",
+    # Ground: a cell you can build on. A cell is one 8x8 tile now, so a single
+    # pixel in its top-left corner draws a lattice at exactly the cell pitch and
+    # the board reads as a grid without any of it competing with the creeps.
+    ("tile_ground", [
+        "1.......", "........", "........", "........",
         "........", "........", "........", "........",
     ]),
-    ("tile_ground_tr", [
-        "......11", ".......1", "........", "........",
-        "........", "........", "........", "........",
-    ]),
-    ("tile_ground_bl", [
-        "........", "........", "........", "........",
-        "........", "........", "1.......", "11......",
-    ]),
-    ("tile_ground_br", [
-        "........", "........", "........", "........",
-        "........", "........", ".......1", "......11",
-    ]),
-    # Path. Deliberately flat and untextured: creeps move along it every frame
+    # Path. Deliberately flat and untextured: creeps move along it every frame,
     # and a busy floor under a moving object is the fastest way to make a Game
     # Boy screen unreadable.
     ("tile_path", [
         "22222222", "22222222", "22222222", "22222222",
         "22222222", "22222222", "22222222", "22222222",
     ]),
-    # The build cursor, as ONE corner bracket. The other three corners are this
-    # same tile with the object's X and Y flip bits set, so a 16x16 cursor costs
-    # four objects and sixteen bytes of tile data.
+    # The build cursor: four corner brackets in one tile, so it costs one object
+    # and never hides the middle of the cell it is sitting on.
     ("tile_cursor", [
-        "33333...", "3.......", "3.......", "3.......",
-        "........", "........", "........", "........",
+        "33....33", "3......3", "........", "........",
+        "........", "........", "3......3", "33....33",
     ]),
     # A creep.
     ("tile_creep", [
@@ -189,7 +174,7 @@ def main():
     # 'A' is character $41, so it is tile $41-$20 and its bytes start there.
     print(".assert chr_41 - tiles_start == ($41 - $20) * 16, "
           '"a tile was inserted into the font and shifted every index after it"')
-    print(".assert tile_ground_tl - tiles_start == $40 * 16, "
+    print(".assert tile_ground - tiles_start == $40 * 16, "
           '"the graphics no longer start where the font ends"')
     print(f".assert tiles_end - tiles_start == {(0x40 + len(GRAPHICS)) * 16}, "
           '"the tile set changed size"')

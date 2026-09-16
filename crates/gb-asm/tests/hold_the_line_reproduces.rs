@@ -87,7 +87,7 @@ fn the_committed_sym_file_describes_the_committed_rom() {
     assert_eq!(addr_of("start"), 0x0150, "the reset vector moved");
 
     // The work RAM the core tests read has to actually be in work RAM.
-    for name in ["wCells", "wPath", "wPathLen", "wCurX", "wCurY"] {
+    for name in ["wCells", "wPathCol", "wPathRow", "wPathDir", "wPathLen", "wCurX", "wCurY"] {
         let a = addr_of(name);
         assert!(
             (0xC000..0xE000).contains(&a),

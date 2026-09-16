@@ -44,14 +44,22 @@
 ; path is an easy bug to write and an impossible one to see by looking.
 
 map_1:
-  .str "S........E"
-  .str "+..++++..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "+..+..+..+"
-  .str "++++..++++"
+  .str "...................."
+  .str "S++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".++++++++++++++++++."
+  .str "..................+."
+  .str ".++++++++++++++++++."
+  .str ".+.................."
+  .str ".++++++++++++++++++E"
+  .str "...................."
+  .str "...................."
 map_1_end:
 
 .assert map_1_end - map_1 == GRID_W * GRID_H, "map 1 is not ten by eight"
@@ -100,8 +108,11 @@ cell_palette_end:
 ; Eight entries, so a cell row never needs a multiply and a cell index never
 ; needs a divide.
 
+; Sixteen entries, so a cell row never needs a multiply. They are WORDS because
+; a 20 by 16 board has 320 cells and row 15 starts at 300, which is not a byte.
 row_base:
-  .byte 0, 10, 20, 30, 40, 50, 60, 70
+  .word 0, 20, 40, 60, 80, 100, 120, 140
+  .word 160, 180, 200, 220, 240, 260, 280, 300
 
 ; ---- palettes ---------------------------------------------------------------
 ; Four fifteen-bit colours each, low byte first, in the order the palette port

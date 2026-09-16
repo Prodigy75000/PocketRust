@@ -64,18 +64,21 @@ OAM_YFLIP = %01000000
 ; 160 by 16 plus 160 by 128 is 160 by 144 exactly, so nothing is centred and
 ; there is no margin anywhere to get wrong.
 
-GRID_W = 10
-GRID_H = 8
+; Ten by eight at 16 pixels a cell was readable but short: the whole route was
+; 36 cells. A switchback on an 8 pixel grid is 134, which is what gives a tower
+; enough exposure to a creep to matter, and it is what Element TD's map shape is
+; for. The cost is that a cell is now one tile rather than four.
+GRID_W = 20
+GRID_H = 16
 GRID_CELLS = GRID_W * GRID_H
 FIELD_ROW = 2                    ; the map row the field starts on
-CELL_TILES = 2                   ; a cell is 2 by 2 tiles
 
-; A cell row is two map rows, and the map is 32 tiles wide.
-ROW_STRIDE = 32 * CELL_TILES
+; A cell is one tile now, and the map is 32 tiles wide.
+ROW_STRIDE = 32
 
-; Long enough for a path that visits most of the board, and a hard stop for a
+; Long enough for a switchback that fills the board, and a hard stop for a
 ; malformed map: the walk gives up here rather than writing past the list.
-PATH_MAX = 64
+PATH_MAX = 144
 
 ; How many creeps may be on the board at once. Sixteen 8x8 objects plus the four
 ; the cursor uses is twenty of the forty the hardware has, which leaves room for
@@ -83,8 +86,9 @@ PATH_MAX = 64
 CREEP_MAX = 16
 
 ; A creep adds this to its position each frame, out of the 256 that make up one
-; cell. Twelve is a cell every 21 frames, so about 2.8 cells a second.
-CREEP_SPEED = 12
+; cell. A cell is eight pixels now, so 32 is one pixel a frame: a creep crosses
+; the whole 134 cell route in about eighteen seconds.
+CREEP_SPEED = 32
 
 ; The trickle that stands in for the wave table until there is one.
 SPAWN_GAP = 40
@@ -120,14 +124,11 @@ OPAL_CREEP  = 1
 ; these is tied to its picture by an assertion at the end of this file, because
 ; a tile number that has quietly drifted from its art is not a thing you find by
 ; reading either one.
-TILE_BLANK     = $00             ; space, the first character of the font
-TILE_GROUND_TL = $40
-TILE_GROUND_TR = $41
-TILE_GROUND_BL = $42
-TILE_GROUND_BR = $43
-TILE_PATH      = $44
-TILE_CURSOR    = $45
-TILE_CREEP     = $46
+TILE_BLANK   = $00               ; space, the first character of the font
+TILE_GROUND  = $40
+TILE_PATH    = $41
+TILE_CURSOR  = $42
+TILE_CREEP   = $43
 
 ; ---- the cartridge ---------------------------------------------------------
 ; No mapper and 32 KB, which is the widest-compatibility Game Boy cartridge
@@ -157,12 +158,14 @@ wCells:        .res GRID_CELLS
 ; everything downstream actually wants, worked out during the walk when the
 ; column and row are already in hand. Drawing a creep never turns a cell index
 ; back into a column, so nothing in the frame loop ever divides by ten.
-wPath:         .res PATH_MAX
+; There is deliberately no array of cell INDICES here any more. A 20 by 16 board
+; has 320 cells, so an index no longer fits in a byte, and everything that used
+; one wanted a column and a row in the end anyway.
 wPathCol:      .res PATH_MAX
 wPathRow:      .res PATH_MAX
 wPathDir:      .res PATH_MAX    ; 0 right, 1 down, 2 left, 3 up, to the next one
 
-.ram $c300
+.ram $c500
 wVBlankDone:   .res 1    ; set by the VBlank handler, cleared by the main loop
 wFrame:        .res 2    ; frames since reset, low byte first
 wJoy:          .res 1    ; buttons held now
@@ -178,9 +181,9 @@ wCurY:         .res 1
 ; rather than for registers.
 wWalkX:        .res 1
 wWalkY:        .res 1
-wWalkPrev:     .res 1    ; the cell it came from, so it cannot turn round
+wWalkPrevX:    .res 1    ; where it came from, so it cannot turn round
+wWalkPrevY:    .res 1
 wWalkDir:      .res 1    ; which of the four neighbours is under test
-wWalkTmp:      .res 1    ; the neighbour's index
 
 wLives:        .res 1
 wWave:         .res 1
@@ -197,7 +200,7 @@ wDrawOff:      .res 1    ; and how far past it, in pixels
 ; One array per field rather than one struct per creep: indexing is a single add
 ; of the slot number, which on this CPU is the difference between a lookup and a
 ; multiply.
-.ram $c400
+.ram $c600
 wCreepAlive:   .res CREEP_MAX
 wCreepIdx:     .res CREEP_MAX    ; waypoint reached
 wCreepSub:     .res CREEP_MAX    ; 0-255 across the sixteen pixels to the next
@@ -406,10 +409,11 @@ start_map:
 ; index into cell_kind, so the picture needs no unpacking of any kind.
 decode_map:
   ld hl, wCells
-  ld c, GRID_CELLS
+  ld bc, GRID_CELLS
 @cell:
   ld a, [de]
   inc de
+  push bc
   push de
   ld e, a
   ld d, 0
@@ -419,8 +423,11 @@ decode_map:
   ld a, [hl]
   pop hl
   pop de
+  pop bc
   ld [hl+], a
-  dec c
+  dec bc
+  ld a, b
+  or c
   jr nz, @cell
   ret
 
@@ -439,7 +446,6 @@ draw_field:
   call draw_cell
   pop de
   inc hl
-  inc hl
   dec b
   jr nz, @col
   pop hl
@@ -454,91 +460,84 @@ draw_field:
   jr nz, @row
   ret
 
-; a = cell kind, hl = the map address of the cell's top-left tile. Writes the
-; four tiles, and on a colour Game Boy the four attributes behind them.
-; Preserves hl, bc and de.
+; a = cell kind, hl = the map address of the cell. Writes the tile, and on a
+; colour Game Boy the attribute behind it. Preserves hl, bc and de.
 draw_cell:
-  push hl
   push bc
   push de
   ld c, a
   ld b, 0
-  ; de -> the four tile numbers for this kind
   push hl
   ld hl, cell_tiles
   add hl, bc
-  add hl, bc
-  add hl, bc
-  add hl, bc
-  ld d, h
-  ld e, l
-  pop hl
-  xor a
-  ldh [VBK], a
-  call blit_quad
-  ld a, [wIsCgb]
-  or a
-  jr z, @done
-  push hl
+  ld a, [hl]
+  ld d, a
   ld hl, cell_palette
   add hl, bc
   ld a, [hl]
+  ld e, a
   pop hl
-  push hl
-  push af
+  xor a
+  ldh [VBK], a
+  ld [hl], d
+  ld a, [wIsCgb]
+  or a
+  jr z, @done
   ld a, 1
   ldh [VBK], a
-  pop af
-  ld [hl+], a
-  ld [hl], a
-  ld bc, 31
-  add hl, bc
-  ld [hl+], a
-  ld [hl], a
-  pop hl
+  ld [hl], e
   xor a
   ldh [VBK], a
 @done:
   pop de
   pop bc
-  pop hl
   ret
 
-; de -> four bytes, hl = the map address of a cell's top-left tile. Writes them
-; into the 2 by 2 block. Preserves hl and bc; de is left past the four.
-blit_quad:
-  push hl
+; c = column, b = row. Returns hl pointing at that cell in wCells. Preserves bc.
+;
+; This exists because 320 cells no longer fit a byte, so row_base is a table of
+; WORDS and the arithmetic has to be sixteen bit the whole way.
+cell_ptr:
+  push de
+  ld e, b
+  ld d, 0
+  ld hl, row_base
+  add hl, de
+  add hl, de
+  ld a, [hl+]
+  ld h, [hl]
+  ld l, a                ; row * GRID_W
+  ld de, wCells
+  add hl, de
+  ld e, c
+  ld d, 0
+  add hl, de
+  pop de
+  ret
+
+; hl -> the cell the walk is currently standing on.
+walk_ptr:
   push bc
-  ld a, [de]
-  inc de
-  ld [hl+], a
-  ld a, [de]
-  inc de
-  ld [hl], a
-  ld bc, 31
-  add hl, bc
-  ld a, [de]
-  inc de
-  ld [hl+], a
-  ld a, [de]
-  inc de
-  ld [hl], a
+  ld a, [wWalkX]
+  ld c, a
+  ld a, [wWalkY]
+  ld b, a
+  call cell_ptr
   pop bc
-  pop hl
   ret
 
 ; ---- the route -------------------------------------------------------------
 
-; Walk the board from the spawn and write the ordered waypoint list into wPath.
+; Walk the board from the spawn and record the route.
 ;
-; The picture in data.s is the only place the route is written down. This
-; derives the order from it, so there is no second copy of the route to fall out
-; of agreement with the first.
+; The picture in data.s is the only place the route is written down. This derives
+; the order from it, so there is no second copy to fall out of agreement with the
+; first. Each waypoint is stored as a column and a row rather than a cell index,
+; both because 320 cells do not fit in a byte and because a column and a row are
+; what drawing a creep actually wants.
 build_path:
   xor a
   ld [wPathLen], a
-  ; Find the spawn, keeping the column and row rather than the index, so that
-  ; nothing here ever needs to divide by ten.
   ld hl, wCells
   ld b, 0                ; row
 @row:
@@ -564,19 +563,14 @@ build_path:
   ld [wWalkY], a
   ld a, c
   ld [wWalkX], a
+  ; $FF is not a column or a row any map can have, so the first step has nowhere
+  ; it is forbidden to go.
   ld a, $ff
-  ld [wWalkPrev], a
-  ld hl, wPath
+  ld [wWalkPrevX], a
+  ld [wWalkPrevY], a
   ld b, 0                ; waypoints written so far
 
 @step:
-  ; wPath[b] is the cell the walk stands on. wPathCol and wPathRow are that same
-  ; place as a column and a row, lifted from the walk's own state while it still
-  ; has them, which is the whole reason nothing downstream needs to divide.
-  call walk_index
-  ld [hl+], a
-  ld c, a                ; keep the cell index; the exit test below wants it
-  push hl
   ld e, b
   ld d, 0
   ld hl, wPathCol
@@ -587,16 +581,11 @@ build_path:
   add hl, de
   ld a, [wWalkY]
   ld [hl], a
-  pop hl
   inc b
+
   ; Stop at the exit.
-  ld e, c
-  ld d, 0
-  push hl
-  ld hl, wCells
-  add hl, de
+  call walk_ptr
   ld a, [hl]
-  pop hl
   cp CELL_EXIT
   jr z, @done
   ; A malformed map must not write past the end of the list.
@@ -604,18 +593,15 @@ build_path:
   cp PATH_MAX
   jr nc, @done
   ; walk_next needs every register it can get, and this loop is holding the
-  ; count in b and the write pointer in hl. Popping does not touch the flags, so
-  ; the "did it move" answer survives being handed its registers back.
-  push hl
+  ; count in b. Popping does not touch the flags, so the "did it move" answer
+  ; survives being handed the registers back.
   push bc
   call walk_next
   pop bc
-  pop hl
   jr z, @done
   ; The direction it just took is the direction away from the waypoint written
   ; last, which is the one at b - 1. The last waypoint never gets one, because
   ; there is nowhere to go from the exit.
-  push hl
   ld a, b
   dec a
   ld e, a
@@ -624,28 +610,11 @@ build_path:
   add hl, de
   ld a, [wWalkDir]
   ld [hl], a
-  pop hl
   jr @step
 
 @done:
   ld a, b
   ld [wPathLen], a
-  ret
-
-; a = the cell index of wherever the walk currently stands. Preserves hl and de.
-walk_index:
-  push hl
-  push de
-  ld a, [wWalkY]
-  ld e, a
-  ld d, 0
-  ld hl, row_base
-  add hl, de
-  ld a, [hl]
-  ld hl, wWalkX
-  add [hl]
-  pop de
-  pop hl
   ret
 
 ; Step the walk to the one neighbour that is walkable and is not where it came
@@ -660,9 +629,9 @@ walk_next:
   ld d, 0
   ld hl, walk_dirs
   add hl, de
-  ; A column of $FF is a step left and a column of ten is a step off the right
-  ; edge. One unsigned comparison against the width rejects both, which is why
-  ; the deltas are stored as bytes and not as a sign and a magnitude.
+  ; A column of $FF is a step left and a column of GRID_W is a step off the
+  ; right edge. One unsigned comparison against the width rejects both, which is
+  ; why the deltas are stored as bytes and not as a sign and a magnitude.
   ld a, [wWalkX]
   add [hl]
   cp GRID_W
@@ -674,22 +643,17 @@ walk_next:
   cp GRID_H
   jr nc, @next
   ld b, a                ; the neighbour's row
-  ld e, b
-  ld d, 0
-  ld hl, row_base
-  add hl, de
-  ld a, [hl]
-  add c
-  ld [wWalkTmp], a
-  ; Not the cell it came from.
-  ld hl, wWalkPrev
-  cp [hl]
+  ; Not where it came from. Both halves have to match for it to be the same
+  ; cell, which is why a column that differs falls straight through to the
+  ; walkable test rather than rejecting.
+  ld a, [wWalkPrevX]
+  cp c
+  jr nz, @walkable
+  ld a, [wWalkPrevY]
+  cp b
   jr z, @next
-  ; And somewhere a creep may walk.
-  ld e, a
-  ld d, 0
-  ld hl, wCells
-  add hl, de
+@walkable:
+  call cell_ptr
   ld a, [hl]
   ld e, a
   ld d, 0
@@ -700,8 +664,10 @@ walk_next:
   jr z, @next
   ; Take it. Where the walk stands now becomes where it came from, which is what
   ; stops it turning round at the next step.
-  call walk_index
-  ld [wWalkPrev], a
+  ld a, [wWalkX]
+  ld [wWalkPrevX], a
+  ld a, [wWalkY]
+  ld [wWalkPrevY], a
   ld a, c
   ld [wWalkX], a
   ld a, b
@@ -728,15 +694,11 @@ walk_dirs:
 ; The four tiles each cell kind is drawn with, in the order blit_quad wants
 ; them: top-left, top-right, bottom-left, bottom-right.
 ;
-; Ground carries a tick in each of its four outer corners so that the board
-; reads as 16-pixel cells rather than as an undifferentiated 8-pixel lattice.
-; The path is flat on purpose: creeps move along it every frame, and a busy
-; floor under a moving object is the fastest way to make a Game Boy unreadable.
+; Spawn and exit are drawn with the path tile and told apart by palette alone.
+; That is readable on a colour Game Boy and invisible on a monochrome one, so
+; they get their own glyphs before this ships.
 cell_tiles:
-  .byte TILE_GROUND_TL, TILE_GROUND_TR, TILE_GROUND_BL, TILE_GROUND_BR
-  .byte TILE_PATH, TILE_PATH, TILE_PATH, TILE_PATH
-  .byte TILE_PATH, TILE_PATH, TILE_PATH, TILE_PATH
-  .byte TILE_PATH, TILE_PATH, TILE_PATH, TILE_PATH
+  .byte TILE_GROUND, TILE_PATH, TILE_PATH, TILE_PATH
 cell_tiles_end:
 
 ; ---- the status bar --------------------------------------------------------
@@ -831,55 +793,24 @@ move_cursor:
 ; tile data.
 build_oam:
   ld hl, wOam
-  ; The field starts sixteen pixels down, an object's Y is its screen position
-  ; plus sixteen, and an object's X is its screen position plus eight.
+  ; A cell is eight pixels. An object's Y is its screen position plus sixteen and
+  ; its X is its screen position plus eight, and the field starts sixteen pixels
+  ; down under the status bar.
   ld a, [wCurY]
-  swap a                 ; times sixteen: the cursor is always cell-aligned
+  add a
+  add a
+  add a
   add 32
-  ld d, a
-  ld a, [wCurX]
-  swap a
-  add 8
-  ld e, a
-
-  ld a, d
   ld [hl+], a
-  ld a, e
+  ld a, [wCurX]
+  add a
+  add a
+  add a
+  add 8
   ld [hl+], a
   ld a, TILE_CURSOR
   ld [hl+], a
   ld a, OPAL_CURSOR
-  ld [hl+], a
-
-  ld a, d
-  ld [hl+], a
-  ld a, e
-  add 8
-  ld [hl+], a
-  ld a, TILE_CURSOR
-  ld [hl+], a
-  ld a, OPAL_CURSOR | OAM_XFLIP
-  ld [hl+], a
-
-  ld a, d
-  add 8
-  ld [hl+], a
-  ld a, e
-  ld [hl+], a
-  ld a, TILE_CURSOR
-  ld [hl+], a
-  ld a, OPAL_CURSOR | OAM_YFLIP
-  ld [hl+], a
-
-  ld a, d
-  add 8
-  ld [hl+], a
-  ld a, e
-  add 8
-  ld [hl+], a
-  ld a, TILE_CURSOR
-  ld [hl+], a
-  ld a, OPAL_CURSOR | OAM_XFLIP | OAM_YFLIP
   ld [hl+], a
 
   call oam_creeps
@@ -1073,26 +1004,33 @@ oam_one_creep:
   ld hl, wCreepSub
   add hl, de
   ld a, [hl]
-  swap a
-  and $0f                ; the sub-position, in whole pixels
+  srl a
+  srl a
+  srl a
+  srl a
+  srl a                  ; sub / 32: the sub-position across eight pixels
   ld [wDrawOff], a
 
-  ; Where that waypoint is. A column is at most nine and a row at most seven, so
-  ; `swap` multiplies either by sixteen with no masking needed.
+  ; Where that waypoint is. A creep fills its cell now, so there is no centring
+  ; to do: the offsets below are the object hardware's own and the status bar's.
   ld a, [wDrawWp]
   ld e, a
   ld d, 0
   ld hl, wPathCol
   add hl, de
   ld a, [hl]
-  swap a
-  add 12                 ; 8 for the object's own offset, 4 to centre it in the cell
+  add a
+  add a
+  add a                  ; column * 8
+  add 8                  ; the object's own X offset
   ld [wDrawX], a
   ld hl, wPathRow
   add hl, de
   ld a, [hl]
-  swap a
-  add 36                 ; 16 for the status bar, 16 for the object, 4 to centre
+  add a
+  add a
+  add a                  ; row * 8
+  add 32                 ; 16 for the status bar, 16 for the object's Y offset
   ld [wDrawY], a
 
   ; And however far along the step it has got.
@@ -1383,20 +1321,17 @@ set_obj_pal:
 .assert tiles_end <= $7fff, "the cartridge has outgrown its 32 KB"
 .assert dma_source_end - dma_source <= 16, "the DMA routine no longer fits in high RAM"
 .assert (wOam & $ff) == 0, "the object buffer must start on a page boundary"
-.assert wPath >= wCells + GRID_CELLS, "the route overlaps the board"
+.assert wPathCol >= wCells + GRID_CELLS, "the route overlaps the board"
 
 ; Every tile number the code uses, tied to the picture it names. A constant that
 ; has drifted from its art is not something you find by reading either one.
-.assert tile_ground_tl - tiles_start == TILE_GROUND_TL * 16, "TILE_GROUND_TL is not where its art is"
-.assert tile_ground_tr - tiles_start == TILE_GROUND_TR * 16, "TILE_GROUND_TR is not where its art is"
-.assert tile_ground_bl - tiles_start == TILE_GROUND_BL * 16, "TILE_GROUND_BL is not where its art is"
-.assert tile_ground_br - tiles_start == TILE_GROUND_BR * 16, "TILE_GROUND_BR is not where its art is"
+.assert tile_ground - tiles_start == TILE_GROUND * 16, "TILE_GROUND is not where its art is"
 .assert tile_path - tiles_start == TILE_PATH * 16, "TILE_PATH is not where its art is"
 .assert tile_cursor - tiles_start == TILE_CURSOR * 16, "TILE_CURSOR is not where its art is"
 .assert tile_creep - tiles_start == TILE_CREEP * 16, "TILE_CREEP is not where its art is"
 
 ; The cell tables have to have a row for every kind, or a decoded map indexes
 ; past the end of one of them and draws whatever follows it.
-.assert cell_tiles_end - cell_tiles == CELL_KINDS * 4, "cell_tiles has lost a kind"
+.assert cell_tiles_end - cell_tiles == CELL_KINDS, "cell_tiles has lost a kind"
 .assert cell_walkable_end - cell_walkable == CELL_KINDS, "cell_walkable has lost a kind"
 .assert cell_palette_end - cell_palette == CELL_KINDS, "cell_palette has lost a kind"

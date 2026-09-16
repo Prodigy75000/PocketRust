@@ -30,9 +30,6 @@ import re
 import sys
 from pathlib import Path
 
-GRID_W = 10
-GRID_H = 8
-
 PATH = "+"
 GROUND = "."
 SPAWN = "S"
@@ -67,10 +64,10 @@ def load_maps(text):
     return {n: r for n, r in maps.items() if n.startswith("map_")}
 
 
-def neighbours(cx, cy):
+def neighbours(cx, cy, w, h):
     for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
         nx, ny = cx + dx, cy + dy
-        if 0 <= nx < GRID_W and 0 <= ny < GRID_H:
+        if 0 <= nx < w and 0 <= ny < h:
             yield nx, ny
 
 
@@ -78,12 +75,13 @@ def check(name, rows):
     """Return a list of complaints, empty if the map is sound."""
     bad = []
 
-    if len(rows) != GRID_H:
-        bad.append(f"has {len(rows)} rows, wanted {GRID_H}")
-        return bad
+    # The grid is whatever the picture is, so this checks any map the assembler
+    # would accept rather than only the one size the game happens to use today.
+    h = len(rows)
+    w = len(rows[0]) if rows else 0
     for y, row in enumerate(rows):
-        if len(row) != GRID_W:
-            bad.append(f"row {y} is {len(row)} wide, wanted {GRID_W}")
+        if len(row) != w:
+            bad.append(f"row {y} is {len(row)} wide but row 0 is {w}")
     if bad:
         return bad
 
@@ -108,7 +106,7 @@ def check(name, rows):
     # Degree: the two ends have one walkable neighbour, everything else two.
     walk_cells = [p for p, c in at.items() if c in WALKABLE]
     for p in walk_cells:
-        deg = sum(1 for n in neighbours(*p) if at[n] in WALKABLE)
+        deg = sum(1 for n in neighbours(*p, w, h) if at[n] in WALKABLE)
         want = 1 if at[p] in (SPAWN, EXIT) else 2
         if deg != want:
             what = {1: "an end", 2: "a link in the chain"}[want]
@@ -127,12 +125,12 @@ def check(name, rows):
         route.append(cur)
         if at[cur] == EXIT:
             break
-        nxt = [n for n in neighbours(*cur) if at[n] in WALKABLE and n != prev]
+        nxt = [n for n in neighbours(*cur, w, h) if at[n] in WALKABLE and n != prev]
         if not nxt:
             bad.append(f"the walk from S got stuck at {cur}")
             return bad
         prev, cur = cur, nxt[0]
-        if len(route) > GRID_W * GRID_H:
+        if len(route) > w * h:
             bad.append("the walk from S never reached E")
             return bad
 
@@ -145,7 +143,8 @@ def check(name, rows):
         )
 
     if not bad:
-        print(f"  {name}: {len(route)} waypoints, S{route[0]} to E{route[-1]}")
+        print(f"  {name}: {w}x{h}, {len(route)} waypoints, {len(walk_cells)} path, "
+              f"{w * h - len(walk_cells)} buildable, S{route[0]} to E{route[-1]}")
     return bad
 
 
