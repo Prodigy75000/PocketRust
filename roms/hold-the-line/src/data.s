@@ -12,6 +12,28 @@
 ;   +  path
 ;   .  ground you can build on
 ;
+; Map 1 takes creeps in at the top left and lets them out at the top RIGHT, the
+; way Element TD does. Both ends being on the same edge is the constraint that
+; decides the whole shape, and it rules out a spiral: a spiral has to finish
+; somewhere in the middle, and there is no way back out to the rim from there
+; without crossing an arm it already drew.
+;
+; What it leaves is a comb. Four vertical corridors, at columns 0, 3, 6 and 9,
+; joined alternately at the bottom and the top, so the route runs down, up, down
+; and out.
+;
+; The columns BETWEEN the corridors are the whole point: every one of them has a
+; corridor on either side, so a tower standing anywhere in a gap covers two
+; passes of the route at once. That is the decision the map exists to create.
+;
+; The corridors are three columns apart rather than two, which is the detail
+; that took a wrong turn first. Two apart also works and is a cell shorter, but
+; four corridors at columns 0, 2, 4 and 6 leave the whole right third of the
+; board too far from anything to be worth building on, and a fifth corridor
+; cannot be added: the route would then finish at the BOTTOM of the board, and
+; there is no way back up to the top edge past a corridor it has already drawn.
+; Three apart uses the full width and wastes nothing.
+;
 ; The ORDER of the path is not written down anywhere. The cartridge walks it
 ; from S at load and builds the waypoint list itself, so there is no list of
 ; coordinates that can quietly stop agreeing with the picture above it.
@@ -22,14 +44,14 @@
 ; path is an easy bug to write and an impossible one to see by looking.
 
 map_1:
-  .str "S++++++++."
-  .str "........+."
-  .str ".++++++++."
-  .str ".+........"
-  .str ".++++++++."
-  .str "........+."
-  .str ".++++++++."
-  .str ".E........"
+  .str "S........E"
+  .str "+..++++..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "++++..++++"
 map_1_end:
 
 .assert map_1_end - map_1 == GRID_W * GRID_H, "map 1 is not ten by eight"

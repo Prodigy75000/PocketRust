@@ -212,10 +212,29 @@ fn the_cartridge_derives_the_route_from_the_picture() {
         "cells {stranded:?} are path but are not on the route"
     );
 
-    // Map 1's serpentine, counted off the picture in data.s by hand and by
+    // Map 1's comb, counted off the picture in data.s by hand and by
     // tools/checkmap.py independently. Stated as an absolute number rather than
     // as a length derived from the route, which would agree with anything.
-    assert_eq!(route.len(), 37, "map 1 is a 37 cell route");
+    assert_eq!(route.len(), 36, "map 1 is a 36 cell route");
+
+    // Creeps go in at the top and come out at the top, which is the constraint
+    // the whole map shape follows from. It is worth asserting because a map that
+    // quietly grew an exit on another edge would still pass every check above:
+    // the route would be perfectly well formed and the game would be a
+    // different game.
+    assert_eq!(row(route[0]), 0, "the spawn is not on the top edge");
+    assert_eq!(
+        row(*route.last().unwrap()),
+        0,
+        "the exit is not on the top edge"
+    );
+
+    // And the two ends are not the same place, which is the degenerate map the
+    // rule above would otherwise allow.
+    assert!(
+        col(route[0]).abs_diff(col(*route.last().unwrap())) > 4,
+        "the two ends are too close together for the route between them to matter"
+    );
 }
 
 #[test]

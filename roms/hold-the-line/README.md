@@ -8,8 +8,8 @@ HOLD THE LINE. Dedicated to the public domain; see LICENSE.
 An element-drafting tower defence for the Game Boy Color, for one player or for
 two over a link cable.
 
-**This is in progress and is not a game yet.** What is here is the board, the
-cartridge skeleton and the checks. `DESIGN.md` beside this file is the spec it
+**This is in progress and is not a game yet.** What is here is the board, creeps
+that walk it, and the checks. There are no towers. `DESIGN.md` beside this file is the spec it
 is being built against, and is worth reading first.
 
 ![The board](screenshots/1-board.png)
@@ -29,11 +29,18 @@ d-pad. Four pure towers and the six pairs between them.
   anywhere to get wrong.
 - A map is a picture in `src/data.s`, ten characters by eight rows, and the
   route creeps walk is **derived from it** rather than written beside it.
+- Creeps that walk that route, leak at the exit, and cost you a life when they
+  do. Waves arrive on a loop and the counter moves.
 - A build cursor that moves and stops at the edges.
+
+A creep is a waypoint index and a fraction of the way to the next one, so the
+carry out of a single eight-bit addition is exactly "it reached the next
+waypoint" and a corner needs no special case at all. That is the reason the
+route is stored as waypoints rather than as pixel coordinates.
 
 ## What is not built yet
 
-Creeps, towers, the element draft, the economy, waves, sound, and the link
+Towers, the element draft, the economy, a real wave table, sound, and the link
 cable. In roughly that order.
 
 ## The route is derived, and that is checked three ways
@@ -58,8 +65,11 @@ neither is visible by looking at the map. So:
    cartridge gets the same answer.
 3. Counting it by hand off the picture, which is where the number 37 came from.
 
-All three say map 1 is a 37 cell route, so the number in the test is an absolute
-one rather than something derived from the route it is checking.
+All three say map 1 is a 36 cell route, so the number in the test is an absolute
+one rather than something derived from the route it is checking. The test also
+asserts that both ends are on the top edge, because a map that quietly grew an
+exit on another edge would pass every other check and simply be a different
+game.
 
 The addresses those tests read come from the committed `.sym` file, not from
 constants, because work RAM moves every time the game grows a variable and a
@@ -93,18 +103,32 @@ cargo test -p gb-core --test hold_the_line
 
 ```
 map_1:
-  .str "S++++++++."
-  .str "........+."
-  .str ".++++++++."
-  .str ".+........"
-  .str ".++++++++."
-  .str "........+."
-  .str ".++++++++."
-  .str ".E........"
+  .str "S........E"
+  .str "+..++++..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "+..+..+..+"
+  .str "++++..++++"
 ```
 
 `S` is where creeps enter, `E` is where they leave and it costs you a life, `+`
 is path, `.` is ground you can build on.
+
+Creeps go in at the top and come out at the top, the way Element TD does, and
+that one constraint decides the whole shape. It rules out a spiral, because a
+spiral has to finish somewhere in the middle and there is no way back out to the
+rim from there without crossing an arm it already drew. What it leaves is a
+comb: four corridors joined alternately at the bottom and the top.
+
+The corridors are three columns apart rather than two, and that is the part
+worth knowing. Two apart also works and is a cell shorter, but it leaves the
+right third of the board too far from anything to build on, and a fifth corridor
+cannot be added to use it, because the route would then finish at the bottom of
+the board. Three apart uses the full width and wastes nothing, so **every dark
+cell on the board has a corridor on either side of it** and a tower placed
+anywhere covers two passes of the route.
 
 Nothing is packed, indexed or compiled by hand. The assembler's `.str` directive
 already emits ASCII minus $20, which is exactly an index into a 64-byte lookup
