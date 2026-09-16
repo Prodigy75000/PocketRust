@@ -144,7 +144,7 @@ status_row0:
   .str "GOLD 100   LIFE  20 "
 status_row0_end:
 status_row1:
-  .str "WAVE  01   NEXT  15 "
+  .str "WAVE  01   SPD   16 "
 status_row1_end:
 
 .assert status_row0_end - status_row0 == 20, "status row 0 is not a screen wide"

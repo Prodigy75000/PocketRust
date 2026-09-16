@@ -86,9 +86,14 @@ PATH_MAX = 144
 CREEP_MAX = 16
 
 ; A creep adds this to its position each frame, out of the 256 that make up one
-; cell. A cell is eight pixels now, so 32 is one pixel a frame: a creep crosses
-; the whole 134 cell route in about eighteen seconds.
-CREEP_SPEED = 32
+; cell. A cell is eight pixels, so 16 is half a pixel a frame and a creep takes
+; about 36 seconds to cross the whole 134 cell route.
+;
+; Select cycles through creep_speeds while the game runs and the status bar shows
+; which one is live, because the right number for this is a thing to find by
+; watching it rather than by reasoning about it.
+CREEP_SPEED = 16
+CREEP_SPEEDS = 6
 
 ; The trickle that stands in for the wave table until there is one.
 SPAWN_GAP = 40
@@ -101,6 +106,7 @@ START_LIVES = 20
 ; is. A tile index is its character minus $20, and '0' is $30.
 LIVES_COL = 17           ; on the first row
 WAVE_COL = 6             ; on the second
+SPEED_COL = 17           ; also on the second
 TILE_DIGIT0 = $10
 
 CELL_GROUND = 0
@@ -187,6 +193,7 @@ wWalkDir:      .res 1    ; which of the four neighbours is under test
 
 wLives:        .res 1
 wWave:         .res 1
+wSpeedSel:     .res 1    ; index into creep_speeds
 wSpawnLeft:    .res 1    ; creeps still to come in this wave
 wSpawnTimer:   .res 1    ; frames until the next one
 
@@ -305,6 +312,7 @@ main:
   call wait_frame
   call read_joypad
   call move_cursor
+  call cycle_speed
   call wave_tick
   call update_creeps
   call build_oam
@@ -391,6 +399,8 @@ start_map:
   ld [wLives], a
   ld a, 1
   ld [wWave], a
+  ld a, 2                ; creep_speeds[2] is CREEP_SPEED
+  ld [wSpeedSel], a
   ld a, WAVE_SIZE
   ld [wSpawnLeft], a
   ld a, SPAWN_GAP
@@ -895,9 +905,53 @@ spawn_creep:
   ld [hl], 0
   ld hl, wCreepSpeed
   add hl, de
-  ld a, CREEP_SPEED
+  call current_speed
   ld [hl], a
   ret
+
+; a = the creep speed currently selected.
+current_speed:
+  push hl
+  push de
+  ld a, [wSpeedSel]
+  ld e, a
+  ld d, 0
+  ld hl, creep_speeds
+  add hl, de
+  ld a, [hl]
+  pop de
+  pop hl
+  ret
+
+; Select steps the creep speed. Everything already on the board is changed too,
+; so the effect is immediate rather than arriving with the next wave, which is
+; the difference between a knob you can tune by eye and one you cannot.
+cycle_speed:
+  ld a, [wJoyNew]
+  bit 2, a               ; select
+  ret z
+  ld hl, wSpeedSel
+  inc [hl]
+  ld a, [hl]
+  cp CREEP_SPEEDS
+  jr c, @apply
+  xor a
+  ld [hl], a
+@apply:
+  call current_speed
+  ld hl, wCreepSpeed
+  ld b, CREEP_MAX
+@loop:
+  ld [hl+], a
+  dec b
+  jr nz, @loop
+  ret
+
+; Slowest to fastest. Each is how much of a cell a creep crosses per frame out
+; of 256, so 16 is a cell every sixteen frames.
+creep_speeds:
+  .byte 4, 8, 16, 24, 32, 48
+creep_speeds_end:
 
 ; The wave is spent, so line the next one up. This is where the element draft
 ; will go, which is why the pause between waves is a named number rather than
@@ -1093,6 +1147,9 @@ draw_status_numbers:
   call draw_number
   ld a, [wWave]
   ld hl, SCRN + 32 + WAVE_COL
+  call draw_number
+  call current_speed
+  ld hl, SCRN + 32 + SPEED_COL
   call draw_number
   ret
 
@@ -1333,5 +1390,6 @@ set_obj_pal:
 ; The cell tables have to have a row for every kind, or a decoded map indexes
 ; past the end of one of them and draws whatever follows it.
 .assert cell_tiles_end - cell_tiles == CELL_KINDS, "cell_tiles has lost a kind"
+.assert creep_speeds_end - creep_speeds == CREEP_SPEEDS, "creep_speeds is not CREEP_SPEEDS long"
 .assert cell_walkable_end - cell_walkable == CELL_KINDS, "cell_walkable has lost a kind"
 .assert cell_palette_end - cell_palette == CELL_KINDS, "cell_palette has lost a kind"

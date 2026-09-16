@@ -99,6 +99,18 @@ The addresses those tests read come from the committed `.sym` file, not from
 constants, because work RAM moves every time the game grows a variable and a
 test that silently reads the wrong byte is worse than no test at all.
 
+## Playing with it while it is being built
+
+On Windows, `play.cmd` in this directory checks the map, assembles, and opens the
+cartridge in a window. Arrows move the build cursor, and **Select steps the creep
+speed** with the number live in the status bar, because the right speed is a
+thing to find by watching rather than by reasoning about.
+
+`tools/mapdraw.html` is a map editor. Open it in a browser; it needs nothing and
+talks to nothing. Draw, and it tells you as you go whether a creep could actually
+walk what you have drawn, using the same rules `checkmap.py` applies at build
+time. When it is happy, paste the block it gives you into `src/data.s`.
+
 ## Building it
 
 Nothing outside this repository is needed. No RGBDS, no assembler to install.

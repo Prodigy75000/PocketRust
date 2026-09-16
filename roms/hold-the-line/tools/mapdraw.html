@@ -1,0 +1,369 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: CC0-1.0
+HOLD THE LINE. Dedicated to the public domain; see LICENSE.
+
+A map editor for the cartridge in this directory. Open it in a browser; it needs
+nothing and talks to nothing.
+
+Draw a map, and it tells you straight away whether a creep could actually walk
+it, using exactly the rules tools/checkmap.py applies at build time: one spawn,
+one exit, no forks, no dead ends, and one unbroken route that touches every path
+cell. When it is happy, copy the block at the bottom into src/data.s.
+
+The colours are the cartridge's own, so what you draw is what the Game Boy shows.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HOLD THE LINE, map editor</title>
+<style>
+  :root {
+    --ground: #182139;
+    --path:   #b59c6b;
+    --spawn:  #5ace5a;
+    --exit:   #de4242;
+    --ui:     #081031;
+    --ink:    #d8e0f0;
+    --dim:    #7f8db0;
+    --bad:    #ff5d5d;
+    --good:   #74e07a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: #0b0f1d; color: var(--ink);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: .12em; }
+  .sub { color: var(--dim); margin: 0 0 20px; font-size: 12px; }
+  .wrap { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  .panel { min-width: 330px; max-width: 430px; }
+
+  /* The board. Cells are 22px so a 20 wide map is a comfortable 440px, and the
+     aspect ratio stays honest: the Game Boy's cells are square too. */
+  #board {
+    display: grid; gap: 0;
+    background: var(--ui); padding: 6px; border-radius: 4px;
+    user-select: none; touch-action: none; width: max-content;
+  }
+  .cell {
+    width: 22px; height: 22px; background: var(--ground);
+    outline: 1px solid rgba(255,255,255,.045); outline-offset: -1px;
+    position: relative; cursor: crosshair;
+  }
+  .cell.path  { background: var(--path); }
+  .cell.spawn { background: var(--spawn); }
+  .cell.exit  { background: var(--exit); }
+  .cell.err::after {
+    content: ''; position: absolute; inset: 2px;
+    border: 2px solid var(--bad); border-radius: 2px;
+  }
+  .cell .n {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 9px; color: #00000090; pointer-events: none;
+  }
+
+  .tools { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }
+  button, select, input {
+    font: inherit; color: var(--ink); background: #18203a;
+    border: 1px solid #2b3557; border-radius: 4px; padding: 5px 10px; cursor: pointer;
+  }
+  button:hover { border-color: #46557f; }
+  button.on { background: #2f3f6e; border-color: #6b7fb5; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
+        margin-right: 7px; vertical-align: -1px; }
+  label { color: var(--dim); }
+  input[type=number] { width: 58px; cursor: text; }
+
+  .verdict { padding: 11px 13px; border-radius: 4px; margin: 0 0 12px;
+             border: 1px solid #2b3557; background: #111831; }
+  .verdict.ok  { border-color: #2f6b3a; }
+  .verdict.no  { border-color: #6b2f2f; }
+  .verdict h2 { font-size: 13px; margin: 0 0 6px; letter-spacing: .06em; }
+  .verdict.ok h2 { color: var(--good); }
+  .verdict.no h2 { color: var(--bad); }
+  .verdict ul { margin: 6px 0 0; padding-left: 18px; }
+  .verdict li { margin: 3px 0; color: #e8c9c9; }
+  .stats { display: flex; gap: 18px; color: var(--dim); font-size: 12px; margin-top: 8px; }
+  .stats b { color: var(--ink); font-weight: 600; }
+
+  textarea {
+    width: 100%; height: 300px; resize: vertical;
+    background: #0d1327; color: var(--ink);
+    border: 1px solid #2b3557; border-radius: 4px; padding: 10px;
+    font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; cursor: text;
+  }
+  .note { color: var(--dim); font-size: 12px; margin: 10px 0 0; }
+  .note b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>HOLD THE LINE &middot; map editor</h1>
+<p class="sub">Draw. It checks as you go, with the same rules the build uses. Paste the result into <code>src/data.s</code>.</p>
+
+<div class="tools">
+  <button data-tool="path"   class="on"><span class="sw" style="background:var(--path)"></span>Path</button>
+  <button data-tool="ground"><span class="sw" style="background:var(--ground);outline:1px solid #3a466e"></span>Ground</button>
+  <button data-tool="spawn"><span class="sw" style="background:var(--spawn)"></span>Spawn</button>
+  <button data-tool="exit"><span class="sw" style="background:var(--exit)"></span>Exit</button>
+  <span style="width:14px"></span>
+  <label>w <input type="number" id="w" value="20" min="4" max="20"></label>
+  <label>h <input type="number" id="h" value="16" min="4" max="16"></label>
+  <button id="clear">Clear</button>
+  <button id="load">Load current map</button>
+  <button id="order">Show order</button>
+</div>
+
+<div class="wrap">
+  <div>
+    <div id="board"></div>
+    <p class="note">
+      Click or drag to paint. There can only be one spawn and one exit, so
+      placing a second moves the first.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="verdict" id="verdict"><h2>...</h2></div>
+    <textarea id="out" spellcheck="false"></textarea>
+    <p class="note">
+      Paste a block in here and it will draw it, so you can start from a map that
+      already exists. <b>20 by 16 is what the cartridge is built for today</b>;
+      anything smaller needs <code>GRID_W</code> and <code>GRID_H</code> changed
+      in <code>src/main.s</code> and <code>row_base</code> regenerated in
+      <code>src/data.s</code>.
+    </p>
+  </div>
+</div>
+
+<script>
+const GROUND = '.', PATH = '+', SPAWN = 'S', EXIT = 'E';
+const WALKABLE = new Set([PATH, SPAWN, EXIT]);
+const CLASS = { '.': 'ground', '+': 'path', 'S': 'spawn', 'E': 'exit' };
+
+let W = 20, H = 16;
+let grid = [];
+let tool = PATH;
+let painting = false;
+let showOrder = false;
+
+const boardEl   = document.getElementById('board');
+const verdictEl = document.getElementById('verdict');
+const outEl     = document.getElementById('out');
+
+function blank() {
+  grid = Array.from({ length: H }, () => Array.from({ length: W }, () => GROUND));
+}
+
+function buildBoard() {
+  boardEl.style.gridTemplateColumns = `repeat(${W}, 22px)`;
+  boardEl.innerHTML = '';
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const d = document.createElement('div');
+      d.className = 'cell';
+      d.dataset.x = x; d.dataset.y = y;
+      boardEl.appendChild(d);
+    }
+  }
+}
+
+function cellAt(x, y) { return boardEl.children[y * W + x]; }
+
+function paint(x, y) {
+  if (x < 0 || y < 0 || x >= W || y >= H) return;
+  if (grid[y][x] === tool) return;
+  // One spawn and one exit, enforced by moving rather than by complaining.
+  if (tool === SPAWN || tool === EXIT) {
+    for (let j = 0; j < H; j++)
+      for (let i = 0; i < W; i++)
+        if (grid[j][i] === tool) grid[j][i] = PATH;
+  }
+  grid[y][x] = tool;
+  render();
+}
+
+boardEl.addEventListener('pointerdown', e => {
+  const c = e.target.closest('.cell'); if (!c) return;
+  painting = true; boardEl.setPointerCapture(e.pointerId);
+  paint(+c.dataset.x, +c.dataset.y);
+});
+boardEl.addEventListener('pointermove', e => {
+  if (!painting) return;
+  const c = document.elementFromPoint(e.clientX, e.clientY);
+  if (c && c.classList.contains('cell')) paint(+c.dataset.x, +c.dataset.y);
+});
+addEventListener('pointerup', () => { painting = false; });
+
+document.querySelectorAll('[data-tool]').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('[data-tool]').forEach(o => o.classList.remove('on'));
+    b.classList.add('on');
+    tool = { path: PATH, ground: GROUND, spawn: SPAWN, exit: EXIT }[b.dataset.tool];
+  };
+});
+
+document.getElementById('clear').onclick = () => { blank(); render(); };
+document.getElementById('order').onclick = e => {
+  showOrder = !showOrder; e.target.classList.toggle('on', showOrder); render();
+};
+for (const id of ['w', 'h']) {
+  document.getElementById(id).onchange = e => {
+    const v = Math.max(4, Math.min(id === 'w' ? 20 : 16, +e.target.value || 4));
+    e.target.value = v;
+    if (id === 'w') W = v; else H = v;
+    blank(); buildBoard(); render();
+  };
+}
+
+/* The map the cartridge ships with today. */
+const CURRENT = [
+  "....................",
+  "S++++++++++++++++++.",
+  "..................+.",
+  ".++++++++++++++++++.",
+  ".+..................",
+  ".++++++++++++++++++.",
+  "..................+.",
+  ".++++++++++++++++++.",
+  ".+..................",
+  ".++++++++++++++++++.",
+  "..................+.",
+  ".++++++++++++++++++.",
+  ".+..................",
+  ".++++++++++++++++++E",
+  "....................",
+  "....................",
+];
+document.getElementById('load').onclick = () => {
+  outEl.value = CURRENT.map(r => `  .str "${r}"`).join('\n');
+  importText();
+};
+
+function importText() {
+  const rows = [];
+  for (const line of outEl.value.split('\n')) {
+    const m = line.match(/"([.+SE]*)"/);
+    if (m && m[1].length) rows.push(m[1]);
+  }
+  if (!rows.length) return;
+  H = Math.min(16, rows.length);
+  W = Math.min(20, rows[0].length);
+  document.getElementById('w').value = W;
+  document.getElementById('h').value = H;
+  blank();
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++)
+      grid[y][x] = rows[y][x] || GROUND;
+  buildBoard();
+  render();
+}
+outEl.addEventListener('paste', () => setTimeout(importText, 0));
+
+/* ---- the check, which is tools/checkmap.py's rules exactly --------------- */
+function neighbours(x, y) {
+  const out = [];
+  for (const [dx, dy] of [[1,0],[0,1],[-1,0],[0,-1]]) {
+    const nx = x + dx, ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < W && ny < H) out.push([nx, ny]);
+  }
+  return out;
+}
+
+function check() {
+  const bad = [], flag = new Set();
+  const at = (x, y) => grid[y][x];
+  const walk = [];
+  let spawn = null, exit = null, spawns = 0, exits = 0;
+
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const c = at(x, y);
+    if (c === SPAWN) { spawns++; spawn = [x, y]; }
+    if (c === EXIT)  { exits++;  exit  = [x, y]; }
+    if (WALKABLE.has(c)) walk.push([x, y]);
+  }
+
+  if (spawns !== 1) bad.push(`${spawns} spawns. There has to be exactly one.`);
+  if (exits  !== 1) bad.push(`${exits} exits. There has to be exactly one.`);
+  if (!spawn || !exit) return { bad, flag, route: [], walk };
+
+  for (const [x, y] of walk) {
+    const deg = neighbours(x, y).filter(([a, b]) => WALKABLE.has(at(a, b))).length;
+    const want = (at(x, y) === SPAWN || at(x, y) === EXIT) ? 1 : 2;
+    if (deg !== want) {
+      flag.add(y * W + x);
+      bad.push(want === 1
+        ? `The ${at(x,y) === SPAWN ? 'spawn' : 'exit'} at (${x},${y}) touches ${deg} path cells. An end touches exactly one.`
+        : `(${x},${y}) touches ${deg} path cells instead of 2. ${deg > 2 ? 'That is a fork, and the route would be ambiguous.' : 'That is a dead end.'}`);
+    }
+  }
+  if (bad.length) return { bad, flag, route: [], walk };
+
+  let cur = spawn, prev = null;
+  const route = [];
+  for (;;) {
+    route.push(cur);
+    if (at(cur[0], cur[1]) === EXIT) break;
+    const nxt = neighbours(cur[0], cur[1]).filter(([a, b]) =>
+      WALKABLE.has(at(a, b)) && !(prev && a === prev[0] && b === prev[1]));
+    if (!nxt.length) { bad.push(`The walk from the spawn gets stuck at (${cur[0]},${cur[1]}).`); break; }
+    prev = cur; cur = nxt[0];
+    if (route.length > W * H) { bad.push('The walk never reaches the exit.'); break; }
+  }
+
+  if (!bad.length && route.length !== walk.length) {
+    const on = new Set(route.map(([x, y]) => y * W + x));
+    const stray = walk.filter(([x, y]) => !on.has(y * W + x));
+    stray.forEach(([x, y]) => flag.add(y * W + x));
+    bad.push(`The route is ${route.length} cells but ${walk.length} are painted. ` +
+      `${stray.length} of them are cut off from it, starting at (${stray[0][0]},${stray[0][1]}). ` +
+      `No creep would ever reach those.`);
+  }
+  return { bad, flag, route, walk };
+}
+
+function render() {
+  const { bad, flag, route, walk } = check();
+
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const el = cellAt(x, y);
+    el.className = 'cell ' + CLASS[grid[y][x]];
+    if (flag.has(y * W + x)) el.classList.add('err');
+    el.innerHTML = '';
+  }
+  if (showOrder && route.length) {
+    route.forEach(([x, y], i) => {
+      if (i % 5 === 0 || i === route.length - 1) {
+        const s = document.createElement('span');
+        s.className = 'n'; s.textContent = i;
+        cellAt(x, y).appendChild(s);
+      }
+    });
+  }
+
+  const ok = !bad.length && route.length > 1;
+  verdictEl.className = 'verdict ' + (ok ? 'ok' : 'no');
+  verdictEl.innerHTML = ok
+    ? `<h2>A creep can walk this</h2>
+       <div class="stats">
+         <span>route <b>${route.length}</b></span>
+         <span>buildable <b>${W * H - walk.length}</b></span>
+         <span>board <b>${W} x ${H}</b></span>
+       </div>`
+    : `<h2>Not yet</h2><ul>${bad.slice(0, 6).map(b => `<li>${b}</li>`).join('')}</ul>`;
+
+  if (document.activeElement !== outEl) {
+    outEl.value = 'map_1:\n' +
+      grid.map(r => `  .str "${r.join('')}"`).join('\n') +
+      '\nmap_1_end:\n';
+  }
+}
+
+blank();
+buildBoard();
+document.getElementById('load').click();
+</script>
+</body>
+</html>
