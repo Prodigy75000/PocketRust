@@ -63,7 +63,7 @@ neither is visible by looking at the map. So:
    is a second implementation in another language, and a second implementation
    agreeing with itself is not the claim; the claim is that the code on the
    cartridge gets the same answer.
-3. Counting it by hand off the picture, which is where the number 37 came from.
+3. Counting it by hand off the picture, which is where the number 36 came from.
 
 All three say map 1 is a 36 cell route, so the number in the test is an absolute
 one rather than something derived from the route it is checking. The test also
