@@ -57,27 +57,27 @@ playable for a player who cannot tell red from green.
 
 ## The board
 
-160 by 144, divided exactly, no margins anywhere:
+160 by 144 is 20 tiles by 18. The interface is a **panel down the right**, six
+columns wide, and the board takes the rest:
 
 ```
-rows 0-1    status bar                        160 x 16
-rows 2-17   the field, 20 x 16 cells of 8x8   160 x 128
+columns 0-13   the board, 14 x 17 cells of 8x8
+columns 14-19  the panel: lives, wave, speed, gold
 ```
 
-A cell `(cx, cy)` is the single tile at map row `2 + cy`, column `cx`. Towers are
+A cell `(cx, cy)` is the single tile at map row `cy`, column `cx`. Towers are
 background tiles, so a full board of towers costs no objects at all. Creeps and
 the build cursor are the only objects on screen.
 
-**This started at 10 by 8 cells of 16x16 and moved.** The reason is the route
-length: the best switchback that fits a 10 by 8 board is 36 cells, and on an 8
-pixel grid it is 134. A tower defence lives on how long a creep spends inside a
-tower's range, so nearly quadrupling the route changes what the game is, and 186
-buildable cells instead of 44 is the difference between placing towers and
-merely having somewhere to put them.
+**The panel is down the side rather than across the top for two reasons.** A
+status strip costs two of the eighteen rows and caps the board at sixteen, which
+turned out to be one row short of the map that was wanted. And the element draft
+needs somewhere to show four running totals and whatever is buildable from them,
+which a two-row strip was never going to hold.
 
-The cost is paid by the art, and it has not been paid yet. See the open question
-about tower silhouettes in the README: eight background palettes, five already
-spent, and ten tower types to tell apart.
+The cost is width: six columns for the panel means the board can be at most
+fourteen across. That is a real trade and it is the reason the route is 106 cells
+rather than the 134 a full-width board held.
 
 ## A map is a picture
 
@@ -87,26 +87,27 @@ afford to throw a map away.
 
 ```
 map_1:
-  .str "...................."
-  .str "S+++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".+++++++++++++++++++"
-  .str "...................."
-  .str "...................."
+  .str "S.........+++E"
+  .str "+.+++.+++.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+++.+++.+++..."
 ```
 
 `S` is where creeps enter, `E` is where they leave and cost you a life, `+` is
-path, `.` is ground you can build on. Twenty characters by sixteen rows, and
+path, `.` is ground you can build on. Fourteen characters by seventeen rows, and
 `.str` already emits ASCII minus $20, so the map is an index into a lookup table
 without anything being packed by hand.
 

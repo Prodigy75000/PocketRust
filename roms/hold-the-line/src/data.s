@@ -44,22 +44,23 @@
 ; path is an easy bug to write and an impossible one to see by looking.
 
 map_1:
-  .str "...................."
-  .str "S++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".++++++++++++++++++E"
-  .str "...................."
-  .str "...................."
+  .str "S.........+++E"
+  .str "+.+++.+++.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+++.+++.+++..."
 map_1_end:
 
 .assert map_1_end - map_1 == GRID_W * GRID_H, "map 1 is not ten by eight"
@@ -111,8 +112,9 @@ cell_palette_end:
 ; Sixteen entries, so a cell row never needs a multiply. They are WORDS because
 ; a 20 by 16 board has 320 cells and row 15 starts at 300, which is not a byte.
 row_base:
-  .word 0, 20, 40, 60, 80, 100, 120, 140
-  .word 160, 180, 200, 220, 240, 260, 280, 300
+  .word 0, 14, 28, 42, 56, 70, 84, 98
+  .word 112, 126, 140, 154, 168, 182, 196, 210
+  .word 224
 
 ; ---- palettes ---------------------------------------------------------------
 ; Four fifteen-bit colours each, low byte first, in the order the palette port
@@ -137,15 +139,22 @@ pal_cursor:
 pal_creep:
   .byte $00, $00, $ff, $7f, $bb, $35, $49, $08
 
-; ---- status bar -------------------------------------------------------------
-; Twenty characters each, the full width of the screen.
+; ---- the side panel --------------------------------------------------------
+; Six characters per row, drawn down the right of the screen. The numbers here
+; are placeholders: draw_status_numbers overwrites them every frame.
 
-status_row0:
-  .str "GOLD 100   LIFE  20 "
-status_row0_end:
-status_row1:
-  .str "WAVE  01   SPD   16 "
-status_row1_end:
+HUD_ROWS = 11
 
-.assert status_row0_end - status_row0 == 20, "status row 0 is not a screen wide"
-.assert status_row1_end - status_row1 == 20, "status row 1 is not a screen wide"
+hud_rows:
+  .str " LIFE "
+  .str "   20 "
+  .str "      "
+  .str " WAVE "
+  .str "   01 "
+  .str "      "
+  .str " SPD  "
+  .str "   16 "
+  .str "      "
+  .str " GOLD "
+  .str "  100 "
+hud_rows_end:

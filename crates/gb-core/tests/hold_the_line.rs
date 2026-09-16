@@ -23,8 +23,8 @@ use gb_core::{Button, GameBoy};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-const GRID_W: u8 = 20;
-const GRID_H: u8 = 16;
+const GRID_W: u8 = 14;
+const GRID_H: u8 = 17;
 const GRID_CELLS: usize = GRID_W as usize * GRID_H as usize;
 
 /// Cell kinds, as `src/main.s` numbers them.
@@ -73,7 +73,7 @@ fn boot() -> (GameBoy, HashMap<String, u16>) {
     let path = rom_dir().join("hold-the-line.gbc");
     let rom = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let mut gb = GameBoy::new(rom);
-    // Reset clears 8 KB of work RAM, copies the tile set and draws 320 cells,
+    // Reset clears 8 KB of work RAM, copies the tile set and draws the board,
     // which takes longer than one frame. By 120 the route is derived.
     run(&mut gb, 120);
     (gb, symbols())
@@ -99,8 +99,8 @@ fn read(gb: &GameBoy, addr: u16, len: usize) -> Vec<u8> {
 /// The board as the cartridge decoded it, and the route as it derived it.
 ///
 /// The route comes back as (column, row) pairs, which is how the cartridge
-/// stores it: a 20 by 16 board has 320 cells, so a cell index would not fit in
-/// a byte, and a column and a row are what drawing a creep wants anyway.
+/// stores it: a column and a row are what drawing a creep wants, and the board
+/// has been resized twice already without that representation caring.
 fn board_and_route(gb: &GameBoy, syms: &HashMap<String, u16>) -> (Vec<u8>, Vec<(u8, u8)>) {
     let cells = read(gb, sym(syms, "wCells"), GRID_CELLS);
     let len = gb.peek(sym(syms, "wPathLen")) as usize;
@@ -122,7 +122,7 @@ fn the_picture_decodes_into_the_board_it_draws() {
     let (gb, syms) = boot();
     let (cells, _) = board_and_route(&gb, &syms);
 
-    assert_eq!(cells.len(), 320, "the board is twenty cells by sixteen");
+    assert_eq!(cells.len(), 238, "the board is fourteen cells by seventeen");
     for (i, &k) in cells.iter().enumerate() {
         assert!(
             k <= CELL_EXIT,
@@ -225,17 +225,16 @@ fn the_cartridge_derives_the_route_from_the_picture() {
     // Map 1's switchback, counted off the picture in data.s by tools/checkmap.py
     // independently. Stated as an absolute number rather than as a length
     // derived from the route, which would agree with anything.
-    assert_eq!(route.len(), 134, "map 1 is a 134 cell route");
+    assert_eq!(route.len(), 106, "map 1 is a 106 cell route");
 
-    // Creeps come in at the left edge and leave at the right, which is what the
-    // switchback's odd number of corridors buys. A map that quietly grew its
-    // ends somewhere else would pass every check above and simply be a different
-    // game.
-    assert_eq!(route[0].0, 0, "the spawn is not on the left edge");
-    assert_eq!(
-        route.last().unwrap().0,
-        GRID_W - 1,
-        "the exit is not on the right edge"
+    // Creeps come in at the top and leave at the top, the way Element TD does.
+    // A map that quietly grew its ends somewhere else would pass every check
+    // above and simply be a different game.
+    assert_eq!(route[0].1, 0, "the spawn is not on the top edge");
+    assert_eq!(route.last().unwrap().1, 0, "the exit is not on the top edge");
+    assert!(
+        route[0].0.abs_diff(route.last().unwrap().0) > 4,
+        "the two ends are too close together for the route between them to matter"
     );
 }
 
@@ -303,7 +302,7 @@ fn creeps_walk_the_route_and_cost_a_life_when_they_get_out() {
     run(&mut gb, 2600);
     assert!(
         gb.peek(lives) < start,
-        "creeps have had 3000 frames to cross a 134 cell route and lives are \
+        "creeps have had 3000 frames to cross a 106 cell route and lives are \
          still {start}, so nothing is leaking at the exit"
     );
 }

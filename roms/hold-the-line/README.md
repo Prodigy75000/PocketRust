@@ -24,9 +24,10 @@ d-pad. Four pure towers and the six pairs between them.
 
 ## What works today
 
-- The board: twenty cells by sixteen, one 8x8 tile each, under a two-tile
-  status bar. 160 by 16 plus 160 by 128 is 160 by 144 exactly, so there is no
-  margin anywhere to get wrong.
+- The board: fourteen cells by seventeen, one 8x8 tile each, with the interface
+  in a panel down the right rather than a strip across the top. The screen is 20
+  tiles by 18; the panel takes six columns, which is what buys the board all
+  eighteen rows instead of sixteen.
 - A map is a picture in `src/data.s`, ten characters by eight rows, and the
   route creeps walk is **derived from it** rather than written beside it.
 - Creeps that walk that route, leak at the exit, and cost you a life when they
@@ -80,13 +81,13 @@ neither is visible by looking at the map. So:
    is a second implementation in another language, and a second implementation
    agreeing with itself is not the claim; the claim is that the code on the
    cartridge gets the same answer.
-3. Counting it by hand off the picture.
+3. `tools/mapdraw.html`, which applies the same rules as you draw.
 
-Both say map 1 is a 134 cell route, so the number in the test is an absolute one
-rather than something derived from the route it is checking. The test also
-asserts the spawn is on the left edge and the exit on the right, because a map
-that quietly grew its ends somewhere else would pass every other check and
-simply be a different game.
+They agree that map 1 is a 106 cell route, so the number in the test is an
+absolute one rather than something derived from the route it is checking. The
+test also asserts both ends are on the top edge, because a map that quietly grew
+its ends somewhere else would pass every other check and simply be a different
+game.
 
 This is not hypothetical. The first draft of this switchback had its top
 corridor ending one column short of the connector below it, so the two were
@@ -139,36 +140,37 @@ cargo test -p gb-core --test hold_the_line
 
 ```
 map_1:
-  .str "...................."
-  .str "S+++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".++++++++++++++++++."
-  .str "..................+."
-  .str ".++++++++++++++++++."
-  .str ".+.................."
-  .str ".+++++++++++++++++++"
-  .str "...................."
-  .str "...................."
+  .str "S.........+++E"
+  .str "+.+++.+++.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+.+.+.+.+.+..."
+  .str "+++.+++.+++..."
 ```
 
 `S` is where creeps enter, `E` is where they leave and it costs you a life, `+`
-is path, `.` is ground you can build on.
+is path, `.` is ground you can build on. In at the top and out at the top, the
+way Element TD does it. **106 cells of route and 132 to build on.**
 
-A switchback, which is the trick Element TD's map is really doing. No branches,
-just one long winding corridor that maximises how much of the route sits inside
-a tower's range on a small board. Seven corridors, joined alternately at the
-right and the left, in at the left edge and out at the right. **134 cells of
-route and 186 to build on**, against 36 and 44 for the 16-pixel board this
-replaced, which is the whole reason for the change.
+This one is a placeholder while the real map gets drawn in `tools/mapdraw.html`.
 
-Every gap row has a corridor above it and below it, so a tower anywhere covers
-two passes.
+**A corridor is one cell wide, always.** That is the rule that catches people
+out, because a two-cell-thick corridor looks like a nicer path and is not a path
+at all: every cell in it touches three or four other path cells, so the route
+forks at every step and the walk has no single answer to follow. One cell is
+eight pixels, which is exactly one creep across, so it is also what looks right
+on the screen.
 
 Nothing is packed, indexed or compiled by hand. The assembler's `.str` directive
 already emits ASCII minus $20, which is exactly an index into a 64-byte lookup

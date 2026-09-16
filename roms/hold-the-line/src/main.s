@@ -64,21 +64,27 @@ OAM_YFLIP = %01000000
 ; 160 by 16 plus 160 by 128 is 160 by 144 exactly, so nothing is centred and
 ; there is no margin anywhere to get wrong.
 
-; Ten by eight at 16 pixels a cell was readable but short: the whole route was
-; 36 cells. A switchback on an 8 pixel grid is 134, which is what gives a tower
-; enough exposure to a creep to matter, and it is what Element TD's map shape is
-; for. The cost is that a cell is now one tile rather than four.
-GRID_W = 20
-GRID_H = 16
+; The screen is 160 by 144, which is 20 tiles by 18. A status bar across the top
+; costs two of those rows and caps the board at sixteen, and sixteen turned out
+; to be one row short of the map that was wanted.
+;
+; So the interface moved to a panel down the RIGHT instead. That gives the board
+; all eighteen rows to use, and it gives the element draft somewhere to live
+; later, which a two-row strip never would have. The cost is width: the panel
+; needs six columns, so the board can be at most fourteen.
+GRID_W = 14
+GRID_H = 17
 GRID_CELLS = GRID_W * GRID_H
-FIELD_ROW = 2                    ; the map row the field starts on
+FIELD_ROW = 0                    ; the map row the field starts on
+HUD_COL = 14                     ; the first map column the panel owns
+HUD_W = 20 - HUD_COL
 
-; A cell is one tile now, and the map is 32 tiles wide.
+; A cell is one tile, and the map is 32 tiles wide.
 ROW_STRIDE = 32
 
-; Long enough for a switchback that fills the board, and a hard stop for a
-; malformed map: the walk gives up here rather than writing past the list.
-PATH_MAX = 144
+; Long enough for a route that fills the board, and a hard stop for a malformed
+; map: the walk gives up here rather than writing past the list.
+PATH_MAX = 176
 
 ; How many creeps may be on the board at once. Sixteen 8x8 objects plus the four
 ; the cursor uses is twenty of the forty the hardware has, which leaves room for
@@ -102,11 +108,11 @@ WAVE_SIZE = 8
 
 START_LIVES = 20
 
-; Where the two-digit fields sit in the status bar, and the tile the digit zero
+; Where each two-digit field sits in the side panel, and the tile the digit zero
 ; is. A tile index is its character minus $20, and '0' is $30.
-LIVES_COL = 17           ; on the first row
-WAVE_COL = 6             ; on the second
-SPEED_COL = 17           ; also on the second
+LIVES_AT = SCRN + 1 * 32 + HUD_COL + 3
+WAVE_AT  = SCRN + 4 * 32 + HUD_COL + 3
+SPEED_AT = SCRN + 7 * 32 + HUD_COL + 3
 TILE_DIGIT0 = $10
 
 CELL_GROUND = 0
@@ -392,7 +398,7 @@ start_map:
   ld de, map_1
   call decode_map
   call draw_field
-  call draw_status
+  call draw_hud
   call build_path
   call clear_creeps
   ld a, START_LIVES
@@ -711,45 +717,64 @@ cell_tiles:
   .byte TILE_GROUND, TILE_PATH, TILE_PATH, TILE_PATH
 cell_tiles_end:
 
-; ---- the status bar --------------------------------------------------------
+; ---- the side panel -------------------------------------------------------
 
-draw_status:
-  ld hl, SCRN
-  ld de, status_row0
-  call blit_row
-  ld hl, SCRN + 32
-  ld de, status_row1
-  call blit_row
-  ld a, [wIsCgb]
-  or a
-  ret z
-  ; Both rows, all 32 columns, in the interface palette.
-  ld a, 1
-  ldh [VBK], a
-  ld hl, SCRN
-  ld bc, 64
-@attr:
-  ld a, PAL_UI
-  ld [hl+], a
-  dec bc
-  ld a, b
-  or c
-  jr nz, @attr
+; Six columns down the right of the screen. Drawn once, with the screen off; the
+; numbers in it are rewritten every vertical blank by draw_status_numbers.
+draw_hud:
   xor a
   ldh [VBK], a
-  ret
-
-; de -> 20 characters, hl -> where they go. Bank 0.
-blit_row:
-  xor a
-  ldh [VBK], a
-  ld b, 20
+  ld de, hud_rows
+  ld hl, SCRN + HUD_COL
+  ld c, HUD_ROWS
+@row:
+  push hl
+  ld b, HUD_W
 @char:
   ld a, [de]
   inc de
   ld [hl+], a
   dec b
   jr nz, @char
+  pop hl
+  ld a, l
+  add 32
+  ld l, a
+  jr nc, @carried
+  inc h
+@carried:
+  dec c
+  jr nz, @row
+
+  ld a, [wIsCgb]
+  or a
+  ret z
+  ; The whole panel, every row of it, in the interface palette. Going down all
+  ; eighteen rows rather than only the ones with words on them is what makes the
+  ; panel read as a panel instead of as text floating beside the board.
+  ld a, 1
+  ldh [VBK], a
+  ld hl, SCRN + HUD_COL
+  ld c, 18
+@attr_row:
+  push hl
+  ld b, HUD_W
+@attr_col:
+  ld a, PAL_UI
+  ld [hl+], a
+  dec b
+  jr nz, @attr_col
+  pop hl
+  ld a, l
+  add 32
+  ld l, a
+  jr nc, @attr_carried
+  inc h
+@attr_carried:
+  dec c
+  jr nz, @attr_row
+  xor a
+  ldh [VBK], a
   ret
 
 ; ---- the build cursor ------------------------------------------------------
@@ -810,8 +835,8 @@ build_oam:
   add a
   add a
   add a
-  add 32
-  ld [hl+], a
+  add 16                 ; the object hardware's own Y offset; the field is at
+  ld [hl+], a            ; the top of the screen now, so there is nothing else
   ld a, [wCurX]
   add a
   add a
@@ -1084,7 +1109,7 @@ oam_one_creep:
   add a
   add a
   add a                  ; row * 8
-  add 32                 ; 16 for the status bar, 16 for the object's Y offset
+  add 16                 ; the object hardware's own Y offset
   ld [wDrawY], a
 
   ; And however far along the step it has got.
@@ -1143,13 +1168,13 @@ draw_status_numbers:
   xor a
   ldh [VBK], a
   ld a, [wLives]
-  ld hl, SCRN + LIVES_COL
+  ld hl, LIVES_AT
   call draw_number
   ld a, [wWave]
-  ld hl, SCRN + 32 + WAVE_COL
+  ld hl, WAVE_AT
   call draw_number
   call current_speed
-  ld hl, SCRN + 32 + SPEED_COL
+  ld hl, SPEED_AT
   call draw_number
   ret
 
@@ -1390,6 +1415,9 @@ set_obj_pal:
 ; The cell tables have to have a row for every kind, or a decoded map indexes
 ; past the end of one of them and draws whatever follows it.
 .assert cell_tiles_end - cell_tiles == CELL_KINDS, "cell_tiles has lost a kind"
+.assert hud_rows_end - hud_rows == HUD_ROWS * HUD_W, "the panel is not HUD_W wide"
+.assert GRID_W + HUD_W <= 20, "the board and the panel do not both fit across the screen"
+.assert GRID_H <= 18, "the board is taller than the screen"
 .assert creep_speeds_end - creep_speeds == CREEP_SPEEDS, "creep_speeds is not CREEP_SPEEDS long"
 .assert cell_walkable_end - cell_walkable == CELL_KINDS, "cell_walkable has lost a kind"
 .assert cell_palette_end - cell_palette == CELL_KINDS, "cell_palette has lost a kind"
