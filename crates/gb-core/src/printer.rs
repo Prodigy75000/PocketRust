@@ -372,6 +372,145 @@ impl LinkCable for Printer {
     }
 }
 
+/// Join the pages the printer was told not to feed paper between.
+///
+/// This is the difference between a printout and a pile of fragments, and it is
+/// protocol knowledge rather than presentation, which is why it lives here and
+/// not in each frontend. A Pokedex entry is **two** print commands: the first
+/// ends with a paper feed of zero and the second begins with one, and on real
+/// paper that means they are one continuous strip. Four clients each deciding
+/// this for themselves is three of them getting it subtly wrong.
+///
+/// Pages that do ask for a feed are left alone, so a run of unrelated prints
+/// comes back unchanged.
+pub fn stitch(sheets: &[Sheet]) -> Vec<Sheet> {
+    let mut out: Vec<Sheet> = Vec::new();
+    let mut continues = false;
+    for s in sheets {
+        if continues && s.margin_before == 0 {
+            if let Some(last) = out.last_mut() {
+                last.height += s.height;
+                last.pixels.extend_from_slice(&s.pixels);
+                last.margin_after = s.margin_after;
+                continues = s.margin_after == 0;
+                continue;
+            }
+        }
+        out.push(s.clone());
+        continues = s.margin_after == 0;
+    }
+    out
+}
+
+impl Sheet {
+    /// The page as a PNG, ready to write to a file or hand to an app.
+    ///
+    /// Written out here rather than pulled in, because the libretro core has no
+    /// dependencies at all and a printed page is not a good enough reason to
+    /// give it one. It is an indexed, two-bit image, which is exactly what the
+    /// printer produces: 160 pixels is 40 bytes a row, so a full Pokedex strip
+    /// is about eight kilobytes rather than the thirty it would be as
+    /// greyscale. The deflate stream is stored blocks, so there is no compressor
+    /// here either; PNG allows that and every decoder accepts it.
+    pub fn to_png(&self) -> Vec<u8> {
+        // The printer's four shades as paper actually looks: no ink to full.
+        const INK: [[u8; 3]; 4] = [
+            [0xFF, 0xFF, 0xFF],
+            [0xA8, 0xA8, 0xA8],
+            [0x54, 0x54, 0x54],
+            [0x00, 0x00, 0x00],
+        ];
+
+        let w = self.width;
+        let h = self.height;
+        let row_bytes = w.div_ceil(4);
+
+        // Each scanline is a filter byte (0, none) then four pixels per byte,
+        // most significant pair first.
+        let mut raw = Vec::with_capacity((row_bytes + 1) * h);
+        for y in 0..h {
+            raw.push(0);
+            for xb in 0..row_bytes {
+                let mut byte = 0u8;
+                for i in 0..4 {
+                    let x = xb * 4 + i;
+                    let v = if x < w { self.pixels[y * w + x] & 3 } else { 0 };
+                    byte |= v << (6 - i * 2);
+                }
+                raw.push(byte);
+            }
+        }
+
+        let mut png = Vec::new();
+        png.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+        ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+        ihdr.extend_from_slice(&[2, 3, 0, 0, 0]); // 2 bits, indexed, no interlace
+        chunk(&mut png, b"IHDR", &ihdr);
+
+        let mut plte = Vec::with_capacity(12);
+        for c in INK {
+            plte.extend_from_slice(&c);
+        }
+        chunk(&mut png, b"PLTE", &plte);
+
+        chunk(&mut png, b"IDAT", &zlib_stored(&raw));
+        chunk(&mut png, b"IEND", &[]);
+        png
+    }
+}
+
+fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(body);
+    let mut crc_input = Vec::with_capacity(4 + body.len());
+    crc_input.extend_from_slice(kind);
+    crc_input.extend_from_slice(body);
+    out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+}
+
+/// A zlib stream of stored (uncompressed) deflate blocks.
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01]; // deflate, 32K window, no preset dictionary
+    let mut chunks = data.chunks(0xFFFF).peekable();
+    if data.is_empty() {
+        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+    }
+    while let Some(part) = chunks.next() {
+        let last = chunks.peek().is_none();
+        out.push(last as u8);
+        out.extend_from_slice(&(part.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(!(part.len() as u16)).to_le_bytes());
+        out.extend_from_slice(part);
+    }
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in data {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 /// A printer you can hand to a core and still hold on to.
 ///
 /// [`GameBoy::connect_link`] takes ownership of whatever it is given, so a
@@ -692,6 +831,96 @@ mod tests {
         out.clear();
         decompress(&[0x7F, 1, 2, 3], &mut out); // 128 literals, only 3 present
         assert_eq!(out, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn pages_with_no_feed_between_them_are_joined() {
+        let page = |before, after, height| Sheet {
+            width: WIDTH,
+            height,
+            pixels: vec![1; WIDTH * height],
+            margin_before: before,
+            margin_after: after,
+            palette: 0xE4,
+            exposure: 0x40,
+            copies: 1,
+        };
+
+        // What a Pokedex entry looks like: feed in, nothing between, feed out.
+        let joined = stitch(&[page(1, 0, 80), page(0, 3, 112)]);
+        assert_eq!(joined.len(), 1, "the two halves are one printout");
+        assert_eq!(joined[0].height, 192);
+        assert_eq!(joined[0].pixels.len(), WIDTH * 192);
+        assert_eq!(joined[0].margin_before, 1, "the strip keeps the outer feeds");
+        assert_eq!(joined[0].margin_after, 3);
+
+        // Two prints that each asked for paper are two printouts, and must not
+        // be glued together just because they arrived one after the other.
+        let apart = stitch(&[page(1, 3, 16), page(1, 3, 16)]);
+        assert_eq!(apart.len(), 2, "pages that fed paper are separate");
+
+        assert!(stitch(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_page_encodes_to_a_png_a_decoder_would_accept() {
+        let s = Sheet {
+            width: WIDTH,
+            height: 16,
+            pixels: (0..WIDTH * 16).map(|i| (i % 4) as u8).collect(),
+            margin_before: 1,
+            margin_after: 0,
+            palette: 0xE4,
+            exposure: 0x40,
+            copies: 1,
+        };
+        let png = s.to_png();
+
+        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        // Chunks in order, each with a length and a type we can find.
+        for (i, kind) in [b"IHDR", b"PLTE", b"IDAT", b"IEND"].iter().enumerate() {
+            assert!(
+                png.windows(4).any(|w| w == kind.as_slice()),
+                "chunk {i} {:?} is missing",
+                std::str::from_utf8(kind.as_slice()).unwrap()
+            );
+        }
+        // The size and format the header claims.
+        assert_eq!(&png[16..20], &(WIDTH as u32).to_be_bytes());
+        assert_eq!(&png[20..24], &16u32.to_be_bytes());
+        assert_eq!(&png[24..29], &[2, 3, 0, 0, 0], "2 bits, indexed");
+
+        // Walk the chunks the way a decoder does and check every CRC, which is
+        // what actually proves this is a file rather than a plausible-looking
+        // pile of bytes.
+        let mut at = 8;
+        let mut kinds = Vec::new();
+        while at + 8 <= png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            let kind = &png[at + 4..at + 8];
+            let body_end = at + 8 + len;
+            let want = u32::from_be_bytes(png[body_end..body_end + 4].try_into().unwrap());
+            assert_eq!(
+                crc32(&png[at + 4..body_end]),
+                want,
+                "bad CRC on {:?}",
+                std::str::from_utf8(kind).unwrap()
+            );
+            kinds.push(String::from_utf8_lossy(kind).to_string());
+            at = body_end + 4;
+        }
+        assert_eq!(at, png.len(), "trailing bytes after the last chunk");
+        assert_eq!(kinds, ["IHDR", "PLTE", "IDAT", "IEND"]);
+    }
+
+    #[test]
+    fn the_checksums_in_the_png_writer_agree_with_known_answers() {
+        // Without this, a broken crc32 would agree with itself above and the
+        // chunk walk would pass on nonsense.
+        assert_eq!(crc32(b""), 0x0000_0000);
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(adler32(b""), 1);
+        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
     }
 
     #[test]

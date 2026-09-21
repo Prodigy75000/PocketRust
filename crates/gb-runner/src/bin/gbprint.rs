@@ -18,7 +18,7 @@
 //! It prints the packet log as it goes, because when a game says it cannot
 //! print, the first thing worth knowing is which packets it actually sent.
 
-use gb_core::{Button, GameBoy, PrinterHandle, Sheet};
+use gb_core::{Button, GameBoy, PrinterHandle};
 use std::fs::File;
 use std::io::BufWriter;
 
@@ -110,25 +110,25 @@ fn main() {
         return;
     }
 
-    println!("\n{} page(s):", sheets.len());
+    println!("
+{} print command(s):", sheets.len());
     for (i, s) in sheets.iter().enumerate() {
         println!(
             "  {i}: {}x{}  copies {}  margins {}/{}  palette ${:02X}  exposure ${:02X}",
             s.width, s.height, s.copies, s.margin_before, s.margin_after, s.palette, s.exposure
         );
-        write_png(&format!("{out}-{i}.png"), s.width, s.height, &s.pixels);
     }
 
-    // Real paper is continuous. Consecutive pages with no feed between them are
-    // one picture, and saving them separately is what turns a Pokedex entry into
-    // a pile of fragments, so the joined version is written too.
-    let strips = stitch(&sheets);
-    if strips.len() != sheets.len() {
-        println!("\n{} strip(s) once the zero margins are joined:", strips.len());
-        for (i, (h, px)) in strips.iter().enumerate() {
-            println!("  {i}: 160x{h}");
-            write_png(&format!("{out}-strip-{i}.png"), 160, *h, px);
-        }
+    // Real paper is continuous. Consecutive prints with no feed between them are
+    // one picture, and the core joins them so no client has to rediscover the
+    // rule: this is the same `stitch` the libretro core uses.
+    let strips = gb_core::stitch(&sheets);
+    println!("
+{} printout(s) once the zero margins are joined:", strips.len());
+    for (i, strip) in strips.iter().enumerate() {
+        let path = format!("{out}-{i}.png");
+        std::fs::write(&path, strip.to_png()).expect("write png");
+        println!("  {i}: {}x{} -> {path}", strip.width, strip.height);
     }
 }
 
@@ -141,49 +141,6 @@ fn name_of(cmd: u8) -> &'static str {
         0x0F => "status",
         _ => "?     ",
     }
-}
-
-/// Join runs of pages that the printer was told not to feed paper between.
-fn stitch(sheets: &[Sheet]) -> Vec<(usize, Vec<u8>)> {
-    let mut out: Vec<(usize, Vec<u8>)> = Vec::new();
-    let mut joined_to_previous = false;
-    for s in sheets {
-        if joined_to_previous && s.margin_before == 0 {
-            if let Some(last) = out.last_mut() {
-                last.0 += s.height;
-                last.1.extend_from_slice(&s.pixels);
-                joined_to_previous = s.margin_after == 0;
-                continue;
-            }
-        }
-        out.push((s.height, s.pixels.clone()));
-        joined_to_previous = s.margin_after == 0;
-    }
-    out
-}
-
-/// The printer's four shades, as the paper actually looks: no ink to full ink.
-fn write_png(path: &str, w: usize, h: usize, pixels: &[u8]) {
-    const INK: [[u8; 3]; 4] = [
-        [0xFF, 0xFF, 0xFF],
-        [0xA8, 0xA8, 0xA8],
-        [0x54, 0x54, 0x54],
-        [0x00, 0x00, 0x00],
-    ];
-    let mut rgb = Vec::with_capacity(w * h * 3);
-    for &p in pixels {
-        rgb.extend_from_slice(&INK[(p & 3) as usize]);
-    }
-    let file = File::create(path).expect("create png");
-    let mut encoder = png::Encoder::new(BufWriter::new(file), w as u32, h as u32);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .write_header()
-        .expect("png header")
-        .write_image_data(&rgb)
-        .expect("png data");
-    println!("     wrote {path}");
 }
 
 /// The same input script `shot` understands.

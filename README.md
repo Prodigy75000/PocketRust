@@ -19,6 +19,7 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and networked play over the libretro netpacket interface (`pocketrust-link-4`) |
+| Game Boy Printer | ✅ full packet protocol on the link port, including RLE; pages joined on the printer's own margins and written as PNG. Verified against Pokemon Yellow printing a Pokedex entry |
 | Networked link | ✅ sequenced paired exchange, sub-frame polling, retransmit; byte-perfect through 1-in-3 packet loss |
 | Demo cartridge | ✅ an original, CC0 Game Boy Color cartridge in `roms/pocketrust-demo/`, built by our own assembler and reproducible byte for byte |
 | Memory map | ✅ full descriptor table (work RAM, high RAM, VRAM, OAM, ROM bank 0, cart RAM, CGB banks 2-7) plus the legacy SYSTEM_RAM / SAVE_RAM ids, so achievements, cheats and RAM watch all address the core |

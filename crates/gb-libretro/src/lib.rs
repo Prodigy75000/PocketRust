@@ -9,9 +9,9 @@
 
 mod netpacket;
 
-use gb_core::{Button, Colorize, GameBoy, SCREEN_H, SCREEN_W};
+use gb_core::{Button, Colorize, GameBoy, PrinterHandle, SCREEN_H, SCREEN_W};
 use std::cell::UnsafeCell;
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_uint, c_void, CStr, CString};
 use std::ptr;
 
 // --- libretro C types we need -------------------------------------------------
@@ -68,6 +68,8 @@ struct retro_variable {
 }
 
 // Environment command + pixel-format constants we use.
+const RETRO_ENVIRONMENT_SET_MESSAGE: u32 = 6;
+const RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY: u32 = 31;
 const RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: u32 = 10;
 const RETRO_ENVIRONMENT_GET_VARIABLE: u32 = 15;
 const RETRO_ENVIRONMENT_SET_VARIABLES: u32 = 16;
@@ -76,6 +78,27 @@ const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 
 /// Core-option key for the DMG colorization toggle (Trophy Hub drives this).
 const OPT_COLORIZE: &CStr = c"pocketrust_colorize";
+const OPT_PRINTER: &CStr = c"pocketrust_printer";
+
+/// `struct retro_message`, for putting a line on the frontend's screen.
+#[repr(C)]
+struct retro_message {
+    msg: *const c_char,
+    frames: c_uint,
+}
+
+/// What is plugged into the link port.
+///
+/// `reconcile_link` used to ask the core "is anything connected", which was
+/// enough when netplay was the only thing that ever was. A printer is also a
+/// connection, so that question now has two answers that need telling apart or
+/// the printer gets disconnected on the very next frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkDevice {
+    None,
+    Netpacket,
+    Printer,
+}
 
 // Device + button ids.
 const RETRO_DEVICE_JOYPAD: u32 = 1;
@@ -121,6 +144,12 @@ struct State {
     /// Set on load; on the next frame we decode the MBC3 RTC out of the SAVE_RAM
     /// buffer the frontend has filled by then (it bypasses `load_sram`).
     restore_rtc: bool,
+    /// What the link port currently has on it, and what the options ask for.
+    link: LinkDevice,
+    printer_wanted: bool,
+    printer: Option<PrinterHandle>,
+    /// Bumped per saved page so two printouts never land on the same filename.
+    print_index: u32,
     env: retro_environment_t,
     video: retro_video_refresh_t,
     audio_batch: retro_audio_sample_batch_t,
@@ -135,6 +164,10 @@ impl State {
             rom: Vec::new(),
             frame: Vec::new(),
             restore_rtc: false,
+            link: LinkDevice::None,
+            printer_wanted: false,
+            printer: None,
+            print_index: 0,
             env: None,
             video: None,
             audio_batch: None,
@@ -247,6 +280,10 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
                 value: c"Colorize GB (DMG) games; auto|off|grayscale".as_ptr(),
             },
             retro_variable {
+                key: OPT_PRINTER.as_ptr(),
+                value: c"Game Boy Printer on the link port; off|on".as_ptr(),
+            },
+            retro_variable {
                 key: ptr::null(),
                 value: ptr::null(),
             },
@@ -285,6 +322,134 @@ fn refresh_variables(s: &mut State) {
         };
         if let Some(gb) = &mut s.gb {
             gb.set_colorization(mode);
+        }
+    }
+
+    let mut var = retro_variable {
+        key: OPT_PRINTER.as_ptr(),
+        value: ptr::null(),
+    };
+    let ok = unsafe {
+        env(
+            RETRO_ENVIRONMENT_GET_VARIABLE,
+            &mut var as *mut retro_variable as *mut c_void,
+        )
+    };
+    if ok && !var.value.is_null() {
+        let val = unsafe { CStr::from_ptr(var.value) }.to_str().unwrap_or("off");
+        s.printer_wanted = val == "on";
+    }
+}
+
+/// Where the frontend keeps saves, which is where printouts go.
+fn save_directory(s: &State) -> Option<String> {
+    let env = s.env?;
+    let mut dir: *const c_char = ptr::null();
+    let ok = unsafe {
+        env(
+            RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY,
+            &mut dir as *mut *const c_char as *mut c_void,
+        )
+    };
+    if !ok || dir.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(dir) }
+        .to_str()
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(|d| d.to_string())
+}
+
+/// Put one line on the frontend's screen for about two seconds.
+fn notify(s: &State, text: &str) {
+    let Some(env) = s.env else { return };
+    let Ok(c) = CString::new(text) else { return };
+    let msg = retro_message {
+        msg: c.as_ptr(),
+        frames: 120,
+    };
+    unsafe {
+        env(
+            RETRO_ENVIRONMENT_SET_MESSAGE,
+            &msg as *const retro_message as *mut c_void,
+        );
+    }
+}
+
+/// Anything a filesystem might object to, turned into an underscore. Cartridge
+/// titles are upper case and spaces in practice, but a corrupt header is not a
+/// good reason to fail to save someone's picture.
+fn safe_name(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() {
+        "gameboy".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Save whatever the printer has finished, as PNG files beside the saves.
+///
+/// The pages are joined first. A Pokedex entry arrives as two print commands
+/// with no paper feed between them, which on real paper is one continuous
+/// strip; saving them separately would hand the player fragments.
+fn drain_printer(s: &mut State) {
+    let Some(printer) = &s.printer else { return };
+    if !printer.has_sheets() {
+        return;
+    }
+    let pages = gb_core::stitch(&printer.take_sheets());
+
+    let Some(root) = save_directory(s) else {
+        notify(s, "Printed, but the frontend gave no save directory");
+        return;
+    };
+    // A subdirectory, not the root. On Android the save directory and the
+    // system directory are the same path, and that path is the shared support
+    // tree for every core in the app: BIOS images, Dolphin's Sys, PCSX2
+    // resources. Dropping user pictures in among firmware would make "clear my
+    // prints" a dangerous thing to ever write. (Told to us by TH-Android, who
+    // checked it in the host rather than recalling it.)
+    let dir = format!("{root}/printer");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        notify(s, &format!("Could not make the printer directory: {e}"));
+        return;
+    };
+    let title = match s.gb.as_ref() {
+        Some(gb) => safe_name(&gb.title()),
+        None => safe_name(""),
+    };
+
+    for page in pages {
+        // Never overwrite a printout that is already there.
+        let path = loop {
+            let candidate = format!("{dir}/{title} print {:03}.png", s.print_index);
+            s.print_index += 1;
+            if !std::path::Path::new(&candidate).exists() {
+                break candidate;
+            }
+            if s.print_index > 9999 {
+                notify(s, "Printed, but there are too many saved printouts");
+                return;
+            }
+        };
+        match std::fs::write(&path, page.to_png()) {
+            Ok(()) => {
+                let name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+                notify(s, &format!("Printed {name}"));
+            }
+            Err(e) => notify(s, &format!("Could not save the printout: {e}")),
         }
     }
 }
@@ -391,15 +556,38 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
 ///
 /// Idempotent: reconciling to a state that already holds does nothing.
 fn reconcile_netlink() {
-    let active = netpacket::is_active();
+    let net_active = netpacket::is_active();
     with_state(|s| {
-        if let Some(gb) = &mut s.gb {
-            match (active, gb.link_connected()) {
-                (true, false) => gb.connect_link(Box::new(netpacket::NetpacketLink)),
-                (false, true) => gb.disconnect_link(),
-                _ => {}
-            }
+        // A live netplay session is a person on the other end of the cable, so
+        // it outranks the printer option whatever that option says.
+        let want = if net_active {
+            LinkDevice::Netpacket
+        } else if s.printer_wanted {
+            LinkDevice::Printer
+        } else {
+            LinkDevice::None
+        };
+        if want == s.link {
+            return;
         }
+        // Build the handle before borrowing the core, so the printer we keep and
+        // the one we hand over are the same object.
+        let fresh = if want == LinkDevice::Printer {
+            Some(PrinterHandle::new())
+        } else {
+            None
+        };
+        let Some(gb) = &mut s.gb else { return };
+        match want {
+            LinkDevice::Netpacket => gb.connect_link(Box::new(netpacket::NetpacketLink)),
+            LinkDevice::Printer => {
+                let h = fresh.clone().expect("built above");
+                gb.connect_link(Box::new(h));
+            }
+            LinkDevice::None => gb.disconnect_link(),
+        }
+        s.printer = fresh;
+        s.link = want;
     });
 }
 
@@ -462,6 +650,9 @@ pub extern "C" fn retro_run() {
         if let Some(gb) = &mut s.gb {
             s.frame.copy_from_slice(gb.step_frame());
         }
+
+        // A print finishes inside a frame, so this is checked after every one.
+        drain_printer(s);
         if let Some(video) = s.video {
             unsafe {
                 video(
@@ -628,12 +819,33 @@ mod map_tests {
     /// against my own copy of the mistake.
     #[test]
     fn experimental_env_ids_carry_the_bit() {
+        // The two the printer added. Neither carries the EXPERIMENTAL bit, so a
+        // bare number is correct here, but they are pinned anyway: the comment
+        // above RETRO_ENVIRONMENT_EXPERIMENTAL exists because a wrong id in this
+        // file once handed the host a bool where it wanted an array of port
+        // descriptors and took the app down with it.
+        assert_eq!(RETRO_ENVIRONMENT_SET_MESSAGE, 6);
+        assert_eq!(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, 31);
+        assert_ne!(RETRO_ENVIRONMENT_SET_MESSAGE, RETRO_ENVIRONMENT_GET_VARIABLE);
+
         assert_eq!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 0x1_0024);
         assert_eq!(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, 0x1_002A);
         assert_ne!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 36);
         assert_ne!(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, 42);
         // 35 is SET_CONTROLLER_INFO. Never send it from here.
         assert_ne!(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, 35);
+    }
+
+    #[test]
+    fn a_printout_filename_survives_a_strange_cartridge_title() {
+        // Real titles are upper case and spaces, but a corrupt or homebrew
+        // header is not a good enough reason to fail to save someone's picture,
+        // and a title with a slash in it would write outside the directory.
+        assert_eq!(safe_name("POKEMON YELLOW"), "POKEMON YELLOW");
+        assert_eq!(safe_name("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(safe_name("  PAD  "), "PAD");
+        assert_eq!(safe_name(""), "gameboy");
+        assert!(!safe_name("a\tb").contains('\t'), "control codes must not survive");
     }
 
     /// The Game Boy Color's extended work RAM starts at **bank 2**, because bank
