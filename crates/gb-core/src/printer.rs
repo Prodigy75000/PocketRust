@@ -180,7 +180,23 @@ impl Printer {
                 if b == 0x88 {
                     self.phase = Phase::Magic2;
                 }
-                0x00
+                // Open bus, NOT $00, while no packet is in progress.
+                //
+                // This printer can be left plugged in permanently, so every game
+                // that pokes the serial port for a cable meets it, not only the
+                // ones that print. An unplugged Game Boy reads $FF back, and a
+                // game looking for a partner uses exactly that to decide nobody
+                // is there. Answering $00 while idle would tell Pokemon's Cable
+                // Club that SOMETHING is on the wire, and the failure would land
+                // on trading rather than on printing, which is a bad place for a
+                // printer to cause a bug.
+                //
+                // A real printer does answer $00 here. The deviation is one byte,
+                // only ever the first of a packet, and only when the printer was
+                // not already mid-packet; games read the reply at the trailer,
+                // not at the magic. Verified by printing a Pokedex entry with
+                // this in place.
+                0xFF
             }
             Phase::Magic2 => {
                 if b == 0x33 {
@@ -652,9 +668,34 @@ mod tests {
         let (alive, st) = reply_of(&answers);
         assert_eq!(alive, DEVICE_ID, "the printer has to say it is there");
         assert_eq!(st, 0, "a fresh printer has nothing to complain about");
-        // Everything before the trailer is zero, which is what tells a game the
-        // packet is being consumed rather than echoed.
-        assert!(answers[..answers.len() - 2].iter().all(|&b| b == 0));
+
+        // The very first byte is open bus, because until $88 arrives the printer
+        // has no idea a packet is starting and a game poking the port for a
+        // cable must see what an empty port looks like. See `Phase::Magic1`.
+        assert_eq!(answers[0], 0xFF, "an idle printer has to look unplugged");
+
+        // Everything after that and before the trailer is zero, which is what
+        // tells a game the packet is being consumed rather than echoed.
+        assert!(answers[1..answers.len() - 2].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn an_idle_printer_is_indistinguishable_from_an_empty_port() {
+        // The whole reason this printer can be left plugged in permanently. A
+        // game hunting for a link partner sends its own handshake, not $88, and
+        // has to get open bus back or it will think somebody is there.
+        let mut p = Printer::new();
+        let pokes = [0x00, 0x01, 0x60, 0xFE, 0x02, 0x81, 0x33];
+        for b in pokes {
+            assert_eq!(
+                p.exchange(b),
+                0xFF,
+                "answering ${b:02X} with anything but open bus tells a game a                  cable is attached when one is not"
+            );
+        }
+        // And it is still a printer afterwards.
+        let answers = send(&mut p, &packet(0x01, false, &[]));
+        assert_eq!(reply_of(&answers).0, DEVICE_ID);
     }
 
     #[test]

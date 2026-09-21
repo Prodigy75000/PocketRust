@@ -13,11 +13,32 @@ without needing the ROM or a save state.
 
 ## Turning it on
 
-A libretro core option:
+A libretro core option, **on by default**:
 
 ```
-pocketrust_printer = off | on
+key     pocketrust_printer
+values  on | off        (lower case, exactly these strings)
 ```
+
+There is deliberately no user-facing toggle. The accessory is a pure slave and,
+because it idles as open bus (below), a game that never prints cannot tell it is
+attached. There is nothing for a player to decide, so a frontend that has not
+read our options at all still gets a working printer.
+
+### It idles as an empty port
+
+While no packet is in progress the printer answers **`$FF`**, not `$00`. This
+matters because the printer can be left plugged in permanently, so every game
+that pokes the serial port meets it, not only the ones that print. An unplugged
+Game Boy reads `$FF` back, and a game hunting for a link partner uses exactly
+that to decide nobody is there. Answering `$00` while idle would tell Pokemon's
+Cable Club that *something* is on the wire, and the failure would land on
+trading rather than on printing.
+
+A real printer does answer `$00` there. The deviation is one byte, only ever the
+first of a packet, and only when the printer was not already mid-packet; games
+read the reply at the trailer, not at the magic. Verified by printing a Pokedex
+entry with it in place.
 
 **A live GameLink session outranks it.** If one is up, the cable is a person and
 the printer setting is ignored until that session ends. A front end that offers

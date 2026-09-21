@@ -165,7 +165,12 @@ impl State {
             frame: Vec::new(),
             restore_rtc: false,
             link: LinkDevice::None,
-            printer_wanted: false,
+            // On unless a frontend says otherwise. The accessory is a pure
+            // slave and, since it idles as open bus, a game that never prints
+            // cannot tell it is there; so there is nothing for a user to decide
+            // and no toggle worth showing them. A frontend that has not read our
+            // options at all still gets a working printer.
+            printer_wanted: true,
             printer: None,
             print_index: 0,
             env: None,
@@ -281,7 +286,7 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
             },
             retro_variable {
                 key: OPT_PRINTER.as_ptr(),
-                value: c"Game Boy Printer on the link port; off|on".as_ptr(),
+                value: c"Game Boy Printer on the link port; on|off".as_ptr(),
             },
             retro_variable {
                 key: ptr::null(),
@@ -337,7 +342,7 @@ fn refresh_variables(s: &mut State) {
     };
     if ok && !var.value.is_null() {
         let val = unsafe { CStr::from_ptr(var.value) }.to_str().unwrap_or("off");
-        s.printer_wanted = val == "on";
+        s.printer_wanted = val != "off";
     }
 }
 
