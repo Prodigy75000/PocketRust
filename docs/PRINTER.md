@@ -101,6 +101,39 @@ This lives in the core on purpose. The margin rule is protocol knowledge, and
 four clients each reimplementing it is three of them getting it subtly wrong.
 Saving each print command separately turns one picture into fragments.
 
+**A file appears when a printout is complete, and that is the whole contract.**
+A frontend should announce one print per file and never try to work out which
+files belong together.
+
+### What happens if the continuation never comes
+
+A page whose margins say "continuous" is **held**, and released when the printer
+has been silent for five seconds (`IDLE_FLUSH_FRAMES`). So a print that the
+player cancelled, or that a crashed cartridge abandoned, still lands: late, but
+it lands, and it lands as its own file.
+
+Five seconds of silence, rather than a fixed delay since the print, because the
+two pages of a Pokedex entry are **750 frames apart**, twelve and a half
+seconds, while the second page's eight data packets crawl over an 8192 Hz link.
+Any fixed timeout long enough for that would make every abandoned print wait an
+age. Within a job the printer is never quiet for more than about a second, so
+silence separates "still working" from "gone" cleanly.
+
+A game being unloaded also releases anything held.
+
+### How this went wrong once
+
+`stitch` takes every page and joins them, which is right when you have them all.
+The libretro core called it **once a frame**, so it never held more than one page
+and joined nothing; every Pokedex entry shipped as two files. The command-line
+tool collected everything first and looked perfect. Same function, opposite
+behaviour, and it surfaced on a phone rather than in a test.
+
+`stitch` is now written in terms of `Spool`, the live assembler, so there is one
+rule instead of two that agree until they do not. `gbprint` drains once a frame
+exactly as the core does, because a tool that exercises a different path from the
+thing it is testing is worse than no tool.
+
 ## Faults
 
 Checksum errors and packet errors are reported, because a game can provoke them.

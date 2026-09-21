@@ -388,33 +388,135 @@ impl LinkCable for Printer {
     }
 }
 
+/// How long the printer must be silent before a held page is given up on.
+///
+/// Measured rather than guessed: Pokemon Yellow's Pokedex entry is two print
+/// commands 750 frames apart, twelve and a half seconds, because the second
+/// page's eight data packets have to crawl over an 8192 Hz serial link. A flat
+/// timeout would have to be longer than that and would then make every
+/// abandoned print wait an age.
+///
+/// Silence is the better signal. Within a job the printer is never quiet for
+/// more than about a second, so five seconds of nothing means the game has moved
+/// on: the player cancelled, or reset, or the cartridge crashed.
+pub const IDLE_FLUSH_FRAMES: u32 = 300;
+
+/// Assembles print commands into printouts, live.
+///
+/// A page whose `margin_after` is zero is not finished: the game intends to
+/// carry on printing onto the same piece of paper. Holding it until the
+/// continuation arrives is the difference between one Pokedex entry and two
+/// fragments.
+///
+/// This exists because [`stitch`] alone was not enough, and the way it was not
+/// enough is worth recording. `stitch` takes a slice of pages and joins them,
+/// which is correct when you have all of them; the libretro core called it once
+/// a frame, so it never held more than a single page and joined nothing at all.
+/// The command-line tool collected everything first and looked right. Same
+/// function, opposite behaviour, and the divergence only showed up on a phone.
+///
+/// So `stitch` is now defined in terms of this, and there is one rule rather
+/// than two that agree until they do not.
+#[derive(Default)]
+pub struct Spool {
+    pending: Option<Sheet>,
+    idle: u32,
+}
+
+impl Spool {
+    pub const fn new() -> Spool {
+        Spool {
+            pending: None,
+            idle: 0,
+        }
+    }
+
+    /// Is a page being held for a continuation that has not arrived?
+    pub fn is_holding(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Feed one finished print command. Returns whatever is now complete, which
+    /// is usually nothing or one printout, and occasionally two: a held page
+    /// that turned out not to continue, followed by a self-contained one.
+    pub fn push(&mut self, sheet: Sheet) -> Vec<Sheet> {
+        self.idle = 0;
+        let mut done = Vec::new();
+        match self.pending.take() {
+            // The held page said "no feed" and this one says "no feed before",
+            // so they are one strip.
+            Some(held) if sheet.margin_before == 0 => {
+                let joined = join(held, sheet);
+                self.hold_or_emit(joined, &mut done);
+            }
+            // The held page expected a continuation and this is not one. Let it
+            // go as it stands rather than gluing unrelated pictures together.
+            Some(held) => {
+                done.push(held);
+                self.hold_or_emit(sheet, &mut done);
+            }
+            None => self.hold_or_emit(sheet, &mut done),
+        }
+        done
+    }
+
+    fn hold_or_emit(&mut self, sheet: Sheet, done: &mut Vec<Sheet>) {
+        if sheet.margin_after == 0 {
+            self.pending = Some(sheet);
+        } else {
+            done.push(sheet);
+        }
+    }
+
+    /// Call once a frame. `saw_traffic` is whether the printer received anything
+    /// this frame. Returns a held page once the game has clearly stopped.
+    pub fn tick(&mut self, saw_traffic: bool) -> Option<Sheet> {
+        if saw_traffic {
+            self.idle = 0;
+            return None;
+        }
+        if self.pending.is_none() {
+            return None;
+        }
+        self.idle += 1;
+        if self.idle >= IDLE_FLUSH_FRAMES {
+            self.idle = 0;
+            return self.pending.take();
+        }
+        None
+    }
+
+    /// Give up anything held, for a game being unloaded or reset. A printout
+    /// that arrives late is better than one that never arrives.
+    pub fn flush(&mut self) -> Option<Sheet> {
+        self.idle = 0;
+        self.pending.take()
+    }
+}
+
+fn join(mut a: Sheet, b: Sheet) -> Sheet {
+    a.height += b.height;
+    a.pixels.extend_from_slice(&b.pixels);
+    a.margin_after = b.margin_after;
+    a
+}
+
 /// Join the pages the printer was told not to feed paper between.
 ///
-/// This is the difference between a printout and a pile of fragments, and it is
-/// protocol knowledge rather than presentation, which is why it lives here and
-/// not in each frontend. A Pokedex entry is **two** print commands: the first
-/// ends with a paper feed of zero and the second begins with one, and on real
-/// paper that means they are one continuous strip. Four clients each deciding
-/// this for themselves is three of them getting it subtly wrong.
+/// For when every page is already in hand; the live path uses [`Spool`], which
+/// this is written in terms of so the two cannot drift apart.
 ///
-/// Pages that do ask for a feed are left alone, so a run of unrelated prints
-/// comes back unchanged.
+/// A Pokedex entry is **two** print commands: the first ends with a paper feed
+/// of zero and the second begins with one, and on real paper that means one
+/// continuous strip. This is protocol knowledge rather than presentation, which
+/// is why it lives here and not in each frontend.
 pub fn stitch(sheets: &[Sheet]) -> Vec<Sheet> {
-    let mut out: Vec<Sheet> = Vec::new();
-    let mut continues = false;
+    let mut spool = Spool::new();
+    let mut out = Vec::new();
     for s in sheets {
-        if continues && s.margin_before == 0 {
-            if let Some(last) = out.last_mut() {
-                last.height += s.height;
-                last.pixels.extend_from_slice(&s.pixels);
-                last.margin_after = s.margin_after;
-                continues = s.margin_after == 0;
-                continue;
-            }
-        }
-        out.push(s.clone());
-        continues = s.margin_after == 0;
+        out.extend(spool.push(s.clone()));
     }
+    out.extend(spool.flush());
     out
 }
 
@@ -550,6 +652,12 @@ impl PrinterHandle {
     /// Every packet the game has sent, as (command, payload length).
     pub fn log(&self) -> Vec<(u8, usize)> {
         self.0.borrow().log.clone()
+    }
+    /// How many packets have arrived. Cheap enough to ask every frame, which
+    /// `log()` is not: the spool needs to know whether the game is still
+    /// talking, not what it said.
+    pub fn packet_count(&self) -> usize {
+        self.0.borrow().log.len()
     }
 }
 
@@ -874,9 +982,8 @@ mod tests {
         assert_eq!(out, vec![1, 2, 3]);
     }
 
-    #[test]
-    fn pages_with_no_feed_between_them_are_joined() {
-        let page = |before, after, height| Sheet {
+    fn page(before: u8, after: u8, height: usize) -> Sheet {
+        Sheet {
             width: WIDTH,
             height,
             pixels: vec![1; WIDTH * height],
@@ -885,22 +992,97 @@ mod tests {
             palette: 0xE4,
             exposure: 0x40,
             copies: 1,
-        };
+        }
+    }
 
-        // What a Pokedex entry looks like: feed in, nothing between, feed out.
-        let joined = stitch(&[page(1, 0, 80), page(0, 3, 112)]);
-        assert_eq!(joined.len(), 1, "the two halves are one printout");
-        assert_eq!(joined[0].height, 192);
-        assert_eq!(joined[0].pixels.len(), WIDTH * 192);
-        assert_eq!(joined[0].margin_before, 1, "the strip keeps the outer feeds");
-        assert_eq!(joined[0].margin_after, 3);
+    #[test]
+    fn the_spool_holds_a_page_that_says_it_continues() {
+        let mut sp = Spool::new();
 
-        // Two prints that each asked for paper are two printouts, and must not
-        // be glued together just because they arrived one after the other.
-        let apart = stitch(&[page(1, 3, 16), page(1, 3, 16)]);
-        assert_eq!(apart.len(), 2, "pages that fed paper are separate");
+        // Page one of a Pokedex entry: no feed after, so not finished.
+        assert!(sp.push(page(1, 0, 80)).is_empty(), "a continuing page emitted early");
+        assert!(sp.is_holding());
 
-        assert!(stitch(&[]).is_empty());
+        // It stays held across the twelve seconds Yellow really takes, as long
+        // as the game is still talking.
+        for _ in 0..750 {
+            assert!(sp.tick(true).is_none(), "traffic should reset the idle count");
+        }
+        assert!(sp.is_holding());
+
+        // Page two arrives and completes the printout.
+        let done = sp.push(page(0, 3, 112));
+        assert_eq!(done.len(), 1, "the two halves are one printout");
+        assert_eq!(done[0].height, 192);
+        assert_eq!(done[0].margin_before, 1, "outer feeds are kept");
+        assert_eq!(done[0].margin_after, 3);
+        assert!(!sp.is_holding());
+    }
+
+    #[test]
+    fn a_page_that_is_never_continued_still_lands() {
+        // The player cancelled, or the game reset. Late is better than never.
+        let mut sp = Spool::new();
+        assert!(sp.push(page(1, 0, 80)).is_empty());
+
+        for _ in 0..(IDLE_FLUSH_FRAMES - 1) {
+            assert!(sp.tick(false).is_none(), "gave up too early");
+        }
+        let out = sp.tick(false).expect("the held page was never released");
+        assert_eq!(out.height, 80);
+        assert!(!sp.is_holding());
+        assert!(sp.tick(false).is_none(), "released it twice");
+    }
+
+    #[test]
+    fn a_self_contained_page_is_emitted_at_once() {
+        let mut sp = Spool::new();
+        let done = sp.push(page(1, 3, 16));
+        assert_eq!(done.len(), 1, "a page that feeds paper is finished");
+        assert!(!sp.is_holding(), "nothing to wait for");
+    }
+
+    #[test]
+    fn an_unrelated_page_does_not_get_glued_to_a_held_one() {
+        let mut sp = Spool::new();
+        sp.push(page(1, 0, 80)); // held
+        // This one asks for a feed BEFORE it, so it is a new piece of paper.
+        let done = sp.push(page(2, 3, 16));
+        assert_eq!(done.len(), 2, "both should come out, separately");
+        assert_eq!(done[0].height, 80, "the held one, as it stood");
+        assert_eq!(done[1].height, 16, "and then the new one");
+    }
+
+    #[test]
+    fn flush_releases_a_held_page_for_an_unloading_game() {
+        let mut sp = Spool::new();
+        sp.push(page(1, 0, 80));
+        assert_eq!(sp.flush().map(|s| s.height), Some(80));
+        assert_eq!(sp.flush().map(|s| s.height), None);
+    }
+
+    #[test]
+    fn stitch_and_the_live_spool_agree() {
+        // The bug this whole type exists for: the batch path joined and the live
+        // path did not. They are the same rule now, so prove it on the same
+        // input rather than trusting that they are.
+        let pages = [page(1, 0, 80), page(0, 3, 112), page(1, 3, 16)];
+
+        let batch = stitch(&pages);
+
+        let mut sp = Spool::new();
+        let mut live = Vec::new();
+        for p in &pages {
+            live.extend(sp.push(p.clone()));
+        }
+        live.extend(sp.flush());
+
+        assert_eq!(batch.len(), live.len(), "batch and live disagree on count");
+        for (b, l) in batch.iter().zip(&live) {
+            assert_eq!(b.height, l.height, "batch and live disagree on a height");
+            assert_eq!(b.pixels, l.pixels, "batch and live disagree on pixels");
+        }
+        assert_eq!(batch.len(), 2, "three commands, two printouts");
     }
 
     #[test]

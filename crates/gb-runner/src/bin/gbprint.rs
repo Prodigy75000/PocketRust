@@ -66,17 +66,34 @@ fn main() {
         play(&mut gb, &keys);
     }
 
+    // Drained once a frame, exactly the way the libretro core does it, feeding
+    // the same `Spool`. This tool used to collect everything and join at the
+    // end, which looked right and hid a bug that only appeared on a phone: the
+    // core joined nothing because it never held more than one page at a time.
+    // A tool that exercises a different path from the thing it is testing is
+    // worse than no tool.
+    let mut spool = gb_core::Spool::new();
+    let mut printouts: Vec<gb_core::Sheet> = Vec::new();
     let mut seen = 0usize;
-    for _ in 0..frames {
+    for f in 0..frames {
         gb.step_frame();
-        let n = printer.log().len();
-        if n != seen {
+        let n = printer.packet_count();
+        let talking = n != seen;
+        if talking {
             for (cmd, len) in printer.log().into_iter().skip(seen) {
-                println!("  packet {} len {len}", name_of(cmd));
+                println!("  frame {f:5}  packet {} len {len}", name_of(cmd));
             }
             seen = n;
         }
+        for sheet in printer.take_sheets() {
+            printouts.extend(spool.push(sheet));
+        }
+        if let Some(late) = spool.tick(talking) {
+            println!("  frame {f:5}  released a page the game never continued");
+            printouts.push(late);
+        }
     }
+    printouts.extend(spool.flush());
 
     if let Some(path) = &shot {
         // The framebuffer is 0x00RRGGBB.
@@ -101,9 +118,9 @@ fn main() {
         println!("screen -> {path}");
     }
 
-    let sheets = printer.take_sheets();
-    if sheets.is_empty() {
-        println!("\nNothing printed.");
+    if printouts.is_empty() {
+        println!("
+Nothing printed.");
         if seen == 0 {
             println!("The game never sent a packet, so it never tried.");
         }
@@ -111,24 +128,14 @@ fn main() {
     }
 
     println!("
-{} print command(s):", sheets.len());
-    for (i, s) in sheets.iter().enumerate() {
-        println!(
-            "  {i}: {}x{}  copies {}  margins {}/{}  palette ${:02X}  exposure ${:02X}",
-            s.width, s.height, s.copies, s.margin_before, s.margin_after, s.palette, s.exposure
-        );
-    }
-
-    // Real paper is continuous. Consecutive prints with no feed between them are
-    // one picture, and the core joins them so no client has to rediscover the
-    // rule: this is the same `stitch` the libretro core uses.
-    let strips = gb_core::stitch(&sheets);
-    println!("
-{} printout(s) once the zero margins are joined:", strips.len());
-    for (i, strip) in strips.iter().enumerate() {
+{} printout(s):", printouts.len());
+    for (i, strip) in printouts.iter().enumerate() {
         let path = format!("{out}-{i}.png");
         std::fs::write(&path, strip.to_png()).expect("write png");
-        println!("  {i}: {}x{} -> {path}", strip.width, strip.height);
+        println!(
+            "  {i}: {}x{}  margins {}/{}  palette ${:02X} -> {path}",
+            strip.width, strip.height, strip.margin_before, strip.margin_after, strip.palette, path = path
+        );
     }
 }
 

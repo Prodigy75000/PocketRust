@@ -9,7 +9,7 @@
 
 mod netpacket;
 
-use gb_core::{Button, Colorize, GameBoy, PrinterHandle, SCREEN_H, SCREEN_W};
+use gb_core::{Button, Colorize, GameBoy, PrinterHandle, Spool, SCREEN_H, SCREEN_W};
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_uint, c_void, CStr, CString};
 use std::ptr;
@@ -148,6 +148,13 @@ struct State {
     link: LinkDevice,
     printer_wanted: bool,
     printer: Option<PrinterHandle>,
+    /// Holds a page whose margins say a continuation is coming, so that a
+    /// printout reaches the frontend as ONE file. Without it the core wrote a
+    /// file per print command, which split every Pokedex entry in half.
+    spool: Spool,
+    /// Packet count at the end of the last frame, to tell "the game is still
+    /// talking" from "the game has stopped".
+    last_packets: usize,
     /// Bumped per saved page so two printouts never land on the same filename.
     print_index: u32,
     env: retro_environment_t,
@@ -172,6 +179,8 @@ impl State {
             // options at all still gets a working printer.
             printer_wanted: true,
             printer: None,
+            spool: Spool::new(),
+            last_packets: 0,
             print_index: 0,
             env: None,
             video: None,
@@ -410,11 +419,30 @@ fn safe_name(title: &str) -> String {
 /// with no paper feed between them, which on real paper is one continuous
 /// strip; saving them separately would hand the player fragments.
 fn drain_printer(s: &mut State) {
-    let Some(printer) = &s.printer else { return };
-    if !printer.has_sheets() {
+    // Two questions every frame: has a print command finished, and is the game
+    // still talking to the printer at all?
+    let (finished, talking) = match &s.printer {
+        Some(p) => {
+            let now = p.packet_count();
+            let talking = now != s.last_packets;
+            s.last_packets = now;
+            (p.take_sheets(), talking)
+        }
+        None => return,
+    };
+
+    let mut ready = Vec::new();
+    for sheet in finished {
+        ready.extend(s.spool.push(sheet));
+    }
+    // A page held for a continuation that never came is released once the game
+    // has clearly stopped, rather than being lost.
+    if let Some(late) = s.spool.tick(talking) {
+        ready.push(late);
+    }
+    if ready.is_empty() {
         return;
     }
-    let pages = gb_core::stitch(&printer.take_sheets());
 
     let Some(root) = save_directory(s) else {
         notify(s, "Printed, but the frontend gave no save directory");
@@ -436,7 +464,7 @@ fn drain_printer(s: &mut State) {
         None => safe_name(""),
     };
 
-    for page in pages {
+    for page in ready {
         // Never overwrite a printout that is already there.
         let path = loop {
             let candidate = format!("{dir}/{title} print {:03}.png", s.print_index);
@@ -451,7 +479,11 @@ fn drain_printer(s: &mut State) {
         };
         match std::fs::write(&path, page.to_png()) {
             Ok(()) => {
-                let name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+                // file_name handles both separators without a char literal.
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path.as_str());
                 notify(s, &format!("Printed {name}"));
             }
             Err(e) => notify(s, &format!("Could not save the printout: {e}")),
@@ -606,7 +638,31 @@ fn reconcile_netlink() {
 
 #[no_mangle]
 pub extern "C" fn retro_unload_game() {
-    with_state(|s| s.gb = None);
+    with_state(|s| {
+        // Anything the spool is holding for a continuation that will now never
+        // come. Writing it late beats losing it.
+        if s.spool.is_holding() {
+            drain_held(s);
+        }
+        s.gb = None;
+    });
+}
+
+/// Release whatever the spool is holding, for a game that is going away.
+fn drain_held(s: &mut State) {
+    let Some(page) = s.spool.flush() else { return };
+    let Some(root) = save_directory(s) else { return };
+    let dir = format!("{root}/printer");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let title = match s.gb.as_ref() {
+        Some(gb) => safe_name(&gb.title()),
+        None => safe_name(""),
+    };
+    let path = format!("{dir}/{title} print {:03}.png", s.print_index);
+    s.print_index += 1;
+    let _ = std::fs::write(&path, page.to_png());
 }
 
 #[no_mangle]
