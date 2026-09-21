@@ -193,7 +193,7 @@ unsafe impl Sync for GlobalState {}
 static STATE: GlobalState = GlobalState(UnsafeCell::new(State::new()));
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    // SAFETY: see `GlobalState` — accesses are serialized by the frontend.
+    // SAFETY: see `GlobalState`; accesses are serialized by the frontend.
     unsafe { f(&mut *STATE.0.get()) }
 }
 
@@ -250,14 +250,14 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
 
     // Offer the link-cable (netpacket) interface here, NOT from retro_load_game.
     //
-    // A host that has to defer wiring the callbacks — because a core's netplay
-    // state isn't built until retro_init — flushes that deferral straight after
+    // A host that has to defer wiring the callbacks, because a core's netplay
+    // state isn't built until retro_init, flushes that deferral straight after
     // retro_init returns. Announcing at load time means the flush point is
     // already behind us, so the host arms a kickstart that nothing ever fires:
     // the session comes up (ICE connected, bridge bound, link pill shown) while
     // the core's send_fn stays null and not one link byte moves. On device that
     // read as the Cable Club attendant refusing a pair that looked connected,
-    // and only on the FIRST GB game after an app start — a warm app was masked
+    // and only on the FIRST GB game after an app start, and a warm app was masked
     // by the previous game's env-78 already sitting in the host's slot.
     //
     // retro_set_environment runs before retro_init on every load path, which is
@@ -548,7 +548,7 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
 /// The edge version dropped sessions. A GameLink session starts when the peers
 /// connect, which is ~2 s before `retro_load_game` runs (measured 2026-08-05:
 /// netpacket start at 02:17:40.216, load at 02:17:42.105). An Attach consumed in
-/// that window found `s.gb == None`, did nothing, and was gone — the cable never
+/// that window found `s.gb == None`, did nothing, and was gone, so the cable never
 /// attached for the rest of the session, so the Cable Club attendant refused the
 /// pair while the app still showed a healthy link. Whether it broke came down to
 /// whether one `retro_run` happened to land in the gap, which is exactly the
