@@ -90,9 +90,9 @@ struct retro_message {
 /// What is plugged into the link port.
 ///
 /// `reconcile_link` used to ask the core "is anything connected", which was
-/// enough when netplay was the only thing that ever was. A printer is also a
-/// connection, so that question now has two answers that need telling apart or
-/// the printer gets disconnected on the very next frame.
+/// enough when the GameLink tunnel was the only thing that ever was. A printer
+/// is also a connection, so that question now has two answers that need telling
+/// apart or the printer gets disconnected on the very next frame.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LinkDevice {
     None,
@@ -558,8 +558,16 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
 fn reconcile_netlink() {
     let net_active = netpacket::is_active();
     with_state(|s| {
-        // A live netplay session is a person on the other end of the cable, so
+        // A live GameLink session is a person on the other end of the cable, so
         // it outranks the printer option whatever that option says.
+        //
+        // GameLink, specifically, and not "netplay". In this fleet those are two
+        // different features and the app tracks them in separate capability
+        // tables: netplay means deterministic input lockstep, which Game Boy
+        // does NOT have, and GameLink is the serial tunnel this core carries
+        // over the netpacket interface, which it does. Using the looser word
+        // here sends the next reader to the wrong table and to the conclusion
+        // that this branch is dead code.
         let want = if net_active {
             LinkDevice::Netpacket
         } else if s.printer_wanted {

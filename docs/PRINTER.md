@@ -19,10 +19,22 @@ A libretro core option:
 pocketrust_printer = off | on
 ```
 
-**A live netplay session outranks it.** If a GameLink session is up, the cable is
-a person and the printer setting is ignored until that session ends. A front end
-that offers both as toggles should disable or explain the printer one while a
-session is live, rather than leaving a control that silently does nothing.
+**A live GameLink session outranks it.** If one is up, the cable is a person and
+the printer setting is ignored until that session ends. A front end that offers
+both as toggles should disable or explain the printer one while a session is
+live, rather than leaving a control that silently does nothing.
+
+GameLink and netplay are **not** synonyms here, and the difference decides
+whether that paragraph applies to you. Netplay means deterministic input
+lockstep, and Game Boy does not have it: Trophy Hub's `netplayReady` list is
+NES, SNES, Mega Drive, PS1, N64 and friends, with no Game Boy slot in it.
+GameLink is the serial tunnel, carried over the libretro netpacket interface
+this core implements, and Game Boy very much does have it: it has been the
+default GB/GBC link path since PocketRust graduated on 2026-08-04, and 0.10.28
+shipped cross-device trading on it.
+
+So this is a real conflict a user can reach, not a defensive branch. Two people
+mid-trade is exactly when a silently dead printer toggle would be noticed.
 
 ## Where the files go
 
