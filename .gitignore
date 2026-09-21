@@ -21,7 +21,12 @@
 !tests/roms/**/*.gb
 !tests/roms/**/*.gbc
 !roms/pocketrust-demo/pocketrust-demo.gbc
+!roms/hold-the-line/hold-the-line.gbc
 /dumps
 
-# The symbol listing is a build convenience, not a deliverable.
+# The symbol listing is a build convenience, not a deliverable, EXCEPT for
+# hold-the-line: crates/gb-core/tests/hold_the_line.rs reads its work RAM
+# addresses out of that listing rather than hard-coding them, so without it the
+# test suite does not run on a fresh clone.
 *.sym
+!roms/hold-the-line/hold-the-line.sym
