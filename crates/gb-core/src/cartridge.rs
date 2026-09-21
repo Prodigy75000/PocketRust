@@ -965,7 +965,11 @@ impl Cartridge {
             let idx = (*ram_bank as usize % banks) * 0x2000 + (addr as usize & 0x1FFF);
             return self.ram.get(idx).copied().unwrap_or(0xFF);
         }
-        if !self.ram_enabled() {
+        // The camera's mapper gates WRITES only: "reading and register writes
+        // are always enabled". Gating reads as well is what made the viewfinder
+        // black, because a disabled read returns $FF, which is both bitplanes
+        // set, which is colour 3.
+        if !self.ram_enabled() && !matches!(self.mbc, Mbc::Camera { .. }) {
             return 0xFF;
         }
         // MBC3: a selected RTC register (0x08-0x0C) reads the latched clock.

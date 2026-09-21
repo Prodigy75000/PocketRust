@@ -96,3 +96,44 @@ fn the_title_screen_actually_draws() {
         seen.len()
     );
 }
+
+#[test]
+fn the_viewfinder_shows_what_the_sensor_captured() {
+    // The path this guards is the whole camera: trigger a capture, develop it
+    // into cartridge RAM, have the game read it back and push it to the screen.
+    //
+    // It exists because of a specific bug. This mapper gates cartridge RAM
+    // WRITES only; the published spec says reading is always enabled. Gating
+    // reads as well made every read return $FF before the game enabled RAM,
+    // which is both bitplanes set, which is colour 3, which is a BLACK
+    // viewfinder. It looked exactly like "no camera attached", which is what
+    // everyone including me assumed it was.
+    let Some(mut gb) = boot() else { return };
+
+    // Main menu, parlor, viewfinder: three presses with time to animate between.
+    for _ in 0..3 {
+        gb.set_button(gb_core::Button::A, true);
+        for _ in 0..8 {
+            gb.step_frame();
+        }
+        gb.set_button(gb_core::Button::A, false);
+        for _ in 0..172 {
+            gb.step_frame();
+        }
+    }
+    let frame = gb.step_frame();
+
+    // The viewfinder occupies the middle of the screen; the edges are the
+    // brightness and contrast sliders, which draw whether or not a capture
+    // worked. So only the middle is evidence.
+    let mut shades = std::collections::HashSet::new();
+    for y in 24..120 {
+        for x in 24..120 {
+            shades.insert(frame[y * 160 + x]);
+        }
+    }
+    assert!(
+        shades.len() > 1,
+        "the viewfinder is one flat colour, so no capture reached the screen.          A single shade here is what a black viewfinder looks like, and it is          also what an unread capture looks like."
+    );
+}

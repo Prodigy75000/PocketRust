@@ -15,7 +15,7 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Timer | ✅ shared 16-bit divider model (DIV / TIMA / TMA / TAC) |
 | Interrupts | ✅ VBlank, STAT, Timer, Serial, Joypad |
 | Cartridges | ✅ no-MBC, MBC1, MBC2, MBC3 (+ RTC), MBC5, HuC1, HuC3 (+ RTC); battery-backed save RAM |
-| Game Boy Camera | 🚧 mapper done, the cartridge boots and runs; the M64282FP sensor model is not written yet, so captures return a placeholder |
+| Game Boy Camera | 🚧 mapper done: the cartridge boots, the viewfinder is live and captures reach the screen. The M64282FP sensor model is not written yet, so what it sees is a placeholder pattern |
 | MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm` |
 | Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
