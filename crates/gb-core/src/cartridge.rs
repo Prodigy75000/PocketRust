@@ -46,6 +46,43 @@ pub enum MbcKind {
     Unsupported(u8),
 }
 
+/// What mapper a cartridge type byte means, and whether it has a battery.
+///
+/// Split out of `Header::parse` so that it is askable without a whole ROM. The
+/// compatibility smoke tester used to carry its own copy of this list, with a
+/// comment saying "mirror cartridge.rs", and it went stale the moment the Game
+/// Boy Camera was added: it reported a supported cartridge as unsupported. Two
+/// lists that have to agree eventually do not.
+fn mbc_kind_of(cart_type: u8) -> (MbcKind, bool) {
+    match cart_type {
+        0x00 => (MbcKind::None, false),
+        0x01 => (MbcKind::Mbc1, false),
+        0x02 => (MbcKind::Mbc1, false),
+        0x03 => (MbcKind::Mbc1, true),
+        0x05 => (MbcKind::Mbc2, false),
+        0x06 => (MbcKind::Mbc2, true),
+        0x0F..=0x13 => (MbcKind::Mbc3, matches!(cart_type, 0x0F | 0x10 | 0x13)),
+        0x19..=0x1E => (MbcKind::Mbc5, matches!(cart_type, 0x1B | 0x1E)),
+        // The Game Boy Camera: 1 MB ROM, 128 KB battery RAM for the photo
+        // album, and an M64282FP sensor reachable through the RAM window.
+        0xFC => (MbcKind::Camera, true),
+        0xFE => (MbcKind::Huc3, true), // HuC3: RAM + RTC + battery
+        0xFF => (MbcKind::Huc1, true), // HuC1: RAM + battery (+ IR)
+        other => (MbcKind::Unsupported(other), false),
+    }
+}
+
+
+/// Is this cartridge type one the core actually maps to a real mapper?
+///
+/// The one place to ask. A cartridge we do not map gets treated as if it had no
+/// mapper at all, which for a banked ROM means garbage on screen rather than an
+/// error, so anything that wants to warn about that needs this answer and must
+/// not keep its own copy of it.
+pub fn mapper_is_supported(cart_type: u8) -> bool {
+    !matches!(mbc_kind_of(cart_type).0, MbcKind::Unsupported(_))
+}
+
 impl Header {
     fn parse(rom: &[u8]) -> Header {
         let title = rom[0x0134..=0x0143]
@@ -55,22 +92,7 @@ impl Header {
             .collect::<String>();
 
         let cart_type = rom[0x0147];
-        let (mbc_kind, has_battery) = match cart_type {
-            0x00 => (MbcKind::None, false),
-            0x01 => (MbcKind::Mbc1, false),
-            0x02 => (MbcKind::Mbc1, false),
-            0x03 => (MbcKind::Mbc1, true),
-            0x05 => (MbcKind::Mbc2, false),
-            0x06 => (MbcKind::Mbc2, true),
-            0x0F..=0x13 => (MbcKind::Mbc3, matches!(cart_type, 0x0F | 0x10 | 0x13)),
-            0x19..=0x1E => (MbcKind::Mbc5, matches!(cart_type, 0x1B | 0x1E)),
-            // The Game Boy Camera: 1 MB ROM, 128 KB battery RAM for the photo
-            // album, and an M64282FP sensor reachable through the RAM window.
-            0xFC => (MbcKind::Camera, true),
-            0xFE => (MbcKind::Huc3, true), // HuC3: RAM + RTC + battery
-            0xFF => (MbcKind::Huc1, true), // HuC1: RAM + battery (+ IR)
-            other => (MbcKind::Unsupported(other), false),
-        };
+        let (mbc_kind, has_battery) = mbc_kind_of(cart_type);
         // Cart types 0x0F (MBC3+TIMER+BATTERY) and 0x10 (MBC3+TIMER+RAM+BATTERY)
         // are the only ones with the RTC crystal.
         let has_rtc = matches!(cart_type, 0x0F | 0x10);

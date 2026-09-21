@@ -24,6 +24,7 @@ mod sgb;
 mod timer;
 
 pub use link::{packet_len, LinkProto, PROTOCOL_VERSION, TAG_CLOCK, TAG_OUTPUT, TAG_REPLY};
+pub use cartridge::mapper_is_supported;
 pub use printer::{packet as printer_packet, stitch, Printer, PrinterHandle, Sheet, Spool};
 pub use serial::{local_pair, LinkCable, LocalLink};
 

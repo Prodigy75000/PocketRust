@@ -16,9 +16,13 @@ use std::sync::{Arc, Mutex};
 
 const FRAMES: u32 = 900; // ~15s at 60 fps (some intros are slow, e.g. Pokemon)
 
-/// Mirror cartridge.rs: the MBC types the core actually maps to a real mapper.
+/// Ask the core, rather than keeping a second copy of its list.
+///
+/// This used to be a hand-maintained `matches!` with a comment saying "mirror
+/// cartridge.rs". It went stale the moment the Game Boy Camera got a mapper and
+/// began reporting a supported cartridge as unsupported.
 fn core_supports_mbc(t: u8) -> bool {
-    matches!(t, 0x00 | 0x01 | 0x02 | 0x03 | 0x05 | 0x06 | 0x0F..=0x13 | 0x19..=0x1E | 0xFE | 0xFF)
+    gb_core::mapper_is_supported(t)
 }
 
 fn mbc_name(t: u8) -> &'static str {
