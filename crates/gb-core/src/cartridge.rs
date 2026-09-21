@@ -41,6 +41,8 @@ pub enum MbcKind {
     Mbc5,
     Huc1,
     Huc3,
+    /// The Game Boy Camera's MAC-GBD. A mapper with an image sensor on it.
+    Camera,
     Unsupported(u8),
 }
 
@@ -62,6 +64,9 @@ impl Header {
             0x06 => (MbcKind::Mbc2, true),
             0x0F..=0x13 => (MbcKind::Mbc3, matches!(cart_type, 0x0F | 0x10 | 0x13)),
             0x19..=0x1E => (MbcKind::Mbc5, matches!(cart_type, 0x1B | 0x1E)),
+            // The Game Boy Camera: 1 MB ROM, 128 KB battery RAM for the photo
+            // album, and an M64282FP sensor reachable through the RAM window.
+            0xFC => (MbcKind::Camera, true),
             0xFE => (MbcKind::Huc3, true), // HuC3: RAM + RTC + battery
             0xFF => (MbcKind::Huc1, true), // HuC1: RAM + battery (+ IR)
             other => (MbcKind::Unsupported(other), false),
@@ -117,6 +122,110 @@ pub struct Cartridge {
 }
 
 /// Per-mapper mutable state.
+/// The camera half of the Game Boy Camera's mapper.
+///
+/// The sensor is not on the link port; it is on the cartridge bus, reached by
+/// writing a RAM bank number with bit 4 set and then talking to $A000 onwards.
+/// So none of the printer's machinery applies here: this is a mapper with an
+/// image sensor bolted to it.
+///
+/// Registers, from the published mapper documentation:
+///
+/// ```text
+///   A000        trigger and status. Writing bit 0 starts a capture; reading
+///               bit 0 gives 1 while the hardware is working. Only the low
+///               three bits exist; the rest read as 0.
+///   A001        sensor gain and edge operation mode
+///   A002-A003   exposure time, 16 bit, MSB first
+///   A004        output voltage reference, edge enhancement ratio, invert
+///   A005        output reference voltage and zero point calibration
+///   A006-A035   a 4 by 4 dither matrix, three bytes per element
+/// ```
+///
+/// Everything except $A000 is write only and reads back $00. The whole block is
+/// mirrored every $80 bytes.
+#[derive(Clone)]
+struct Cam {
+    /// The low three bits of $A000. Bit 0 is the capture trigger and the busy
+    /// flag, which are the same bit.
+    trigger: u8,
+    /// $A001 to $A035: the sensor configuration and the dither matrix.
+    regs: [u8; 0x35],
+    /// Wall-clock T-cycles left of an exposure. A capture that never finished
+    /// would leave a game spinning on the busy bit forever.
+    busy: i32,
+}
+
+/// How long a capture is reported as busy.
+///
+/// The real exposure is set by $A002-$A003 and varies with the light; a
+/// hundredth of a second is a plausible middle and, more importantly, is
+/// guaranteed to end. Wiring this to the exposure registers belongs with the
+/// sensor model, not with the mapper.
+const CAMERA_CAPTURE_CYCLES: i32 = (CYCLES_PER_SECOND / 100) as i32;
+
+/// Where the captured image lands in cartridge RAM, in bank 0.
+const CAMERA_IMAGE_OFFSET: usize = 0x0100;
+
+/// The sensor is 128 by 128, but the controller throws away the first eight rows
+/// and the last eight, so what reaches the cartridge is 128 by 112.
+const CAMERA_W: usize = 128;
+const CAMERA_H: usize = 112;
+
+impl Cam {
+    fn new() -> Cam {
+        Cam {
+            trigger: 0,
+            regs: [0; 0x35],
+            busy: 0,
+        }
+    }
+
+    fn read(&self, addr: u16) -> u8 {
+        // Mirrored every $80 bytes.
+        let i = (addr as usize - 0xA000) % 0x80;
+        if i == 0 {
+            // Only the low three bits are real, and bit 0 is the BUSY flag on
+            // the way out even though it is the TRIGGER on the way in. Keeping
+            // the bit the game wrote would leave it set forever and the game
+            // polls this in a tight loop waiting for it to clear: mask it off
+            // and let only the capture decide.
+            (self.trigger & 0x06) | if self.busy > 0 { 1 } else { 0 }
+        } else {
+            // Every other register is write only.
+            0x00
+        }
+    }
+
+    /// Returns true if this write started a capture.
+    fn write(&mut self, addr: u16, val: u8) -> bool {
+        let i = (addr as usize - 0xA000) % 0x80;
+        if i == 0 {
+            self.trigger = val & 0x07;
+            // Only a write with bit 0 set triggers; anything else is an
+            // ordinary write to the register.
+            if val & 1 != 0 {
+                self.busy = CAMERA_CAPTURE_CYCLES;
+                return true;
+            }
+            return false;
+        }
+        if i <= 0x35 {
+            self.regs[i - 1] = val;
+        }
+        false
+    }
+
+    fn tick(&mut self, cycles: u32) {
+        if self.busy > 0 {
+            self.busy -= cycles as i32;
+            if self.busy < 0 {
+                self.busy = 0;
+            }
+        }
+    }
+}
+
 enum Mbc {
     None,
     Mbc1 {
@@ -152,6 +261,14 @@ enum Mbc {
         rom_bank: u8, // 7 bits
         ram_bank: u8, // 4 bits
         huc3: Huc3,   // mode register + RTC/config command MCU
+    },
+    Camera {
+        ram_enabled: bool,
+        rom_bank: u8, // 6 bits, $00-$3F
+        /// $00-$0F picks a RAM bank; **bit 4 set** swaps the whole $A000 window
+        /// for the camera registers instead.
+        ram_bank: u8,
+        cam: Cam,
     },
 }
 
@@ -529,6 +646,12 @@ impl Cartridge {
                 rom_bank: 1,
                 ram_bank: 0,
             },
+            MbcKind::Camera => Mbc::Camera {
+                ram_enabled: false,
+                rom_bank: 1,
+                ram_bank: 0,
+                cam: Cam::new(),
+            },
             MbcKind::Huc1 => Mbc::Huc1 {
                 ir_mode: false,
                 rom_bank: 1,
@@ -605,6 +728,18 @@ impl Cartridge {
                 let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
                 *self.rom.get(offset).unwrap_or(&0xFF)
             }
+            // The camera's mapper takes $00-$3F and, unlike MBC1, the
+            // documentation says nothing about remapping bank 0, so bank 0 is
+            // selectable into the high window the way MBC5 allows.
+            Mbc::Camera { rom_bank, .. } => {
+                let bank = if addr < 0x4000 {
+                    0
+                } else {
+                    (*rom_bank as usize) & (self.header.rom_banks - 1)
+                };
+                let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
+                *self.rom.get(offset).unwrap_or(&0xFF)
+            }
             // HuC1 and HuC3 bank like an MBC1/MBC3 (bank 0 not selectable high).
             Mbc::Huc1 { rom_bank, .. } | Mbc::Huc3 { rom_bank, .. } => {
                 let bank = if addr < 0x4000 {
@@ -622,6 +757,19 @@ impl Cartridge {
     pub fn write_rom(&mut self, addr: u16, val: u8) {
         match &mut self.mbc {
             Mbc::None => {}
+            Mbc::Camera {
+                ram_enabled,
+                rom_bank,
+                ram_bank,
+                ..
+            } => match addr {
+                0x0000..=0x1FFF => *ram_enabled = val & 0x0F == 0x0A,
+                0x2000..=0x3FFF => *rom_bank = val & 0x3F,
+                // Bit 4 is kept: it is the register/album switch for the $A000
+                // window, not part of the bank number.
+                0x4000..=0x5FFF => *ram_bank = val & 0x1F,
+                _ => {}
+            },
             Mbc::Mbc1 {
                 ram_enabled,
                 rom_bank,
@@ -699,6 +847,61 @@ impl Cartridge {
         }
     }
 
+    /// Is the $A000 window showing the camera registers rather than the album?
+    fn camera_registers_selected(&self) -> bool {
+        matches!(&self.mbc, Mbc::Camera { ram_bank, .. } if ram_bank & 0x10 != 0)
+    }
+
+    /// Advance an exposure, and finish one that has run its course.
+    fn tick_camera(&mut self, cycles: u32) {
+        let finished = match &mut self.mbc {
+            Mbc::Camera { cam, .. } => {
+                let was = cam.busy;
+                cam.tick(cycles);
+                was > 0 && cam.busy == 0
+            }
+            _ => return,
+        };
+        if finished {
+            self.camera_develop();
+        }
+    }
+
+    /// Write the captured image into the album where the cartridge expects it.
+    ///
+    /// The sensor model is not built yet, so this is a placeholder gradient: a
+    /// picture that is obviously synthetic, so that nobody mistakes it for a
+    /// working camera, but which exercises the whole path from trigger to
+    /// tiles. The real thing takes a greyscale frame and runs the exposure,
+    /// edge enhancement and dither the registers ask for.
+    fn camera_develop(&mut self) {
+        let tiles_across = CAMERA_W / 8;
+        let tiles_down = CAMERA_H / 8;
+        for ty in 0..tiles_down {
+            for tx in 0..tiles_across {
+                let tile = ty * tiles_across + tx;
+                for row in 0..8 {
+                    let y = ty * 8 + row;
+                    let mut lo = 0u8;
+                    let mut hi = 0u8;
+                    for col in 0..8 {
+                        let x = tx * 8 + col;
+                        // A diagonal ramp through the four shades.
+                        let shade = (((x + y) / 16) % 4) as u8;
+                        let bit = 7 - col;
+                        lo |= (shade & 1) << bit;
+                        hi |= ((shade >> 1) & 1) << bit;
+                    }
+                    let at = CAMERA_IMAGE_OFFSET + tile * 16 + row * 2;
+                    if at + 1 < self.ram.len() {
+                        self.ram[at] = lo;
+                        self.ram[at + 1] = hi;
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether cartridge RAM is currently readable/writable.
     fn ram_enabled(&self) -> bool {
         match &self.mbc {
@@ -707,6 +910,10 @@ impl Cartridge {
             | Mbc::Mbc2 { ram_enabled, .. }
             | Mbc::Mbc3 { ram_enabled, .. }
             | Mbc::Mbc5 { ram_enabled, .. } => *ram_enabled,
+            // The camera's REGISTERS are always reachable; only the photo
+            // album behind them needs enabling. The register case never gets
+            // this far, so this is only ever asked about RAM.
+            Mbc::Camera { ram_enabled, .. } => *ram_enabled,
             // HuC1 RAM is reachable whenever the window isn't in IR mode.
             Mbc::Huc1 { ir_mode, .. } => !*ir_mode,
             // HuC3 RAM is reachable in mode 0x0A (handled before this gate).
@@ -716,6 +923,13 @@ impl Cartridge {
 
     /// Read from cartridge RAM (0xA000..=0xBFFF).
     pub fn read_ram(&self, addr: u16) -> u8 {
+        // The camera's registers take over the whole window when bit 4 of the
+        // RAM bank is set, and they answer whether or not RAM is enabled.
+        if self.camera_registers_selected() {
+            if let Mbc::Camera { cam, .. } = &self.mbc {
+                return cam.read(addr);
+            }
+        }
         // HuC1: the IR window reads back "no signal"; otherwise it is RAM.
         if let Mbc::Huc1 { ir_mode: true, .. } = &self.mbc {
             return 0xC0;
@@ -756,6 +970,12 @@ impl Cartridge {
 
     /// Write to cartridge RAM (0xA000..=0xBFFF).
     pub fn write_ram(&mut self, addr: u16, val: u8) {
+        if self.camera_registers_selected() {
+            if let Mbc::Camera { cam, .. } = &mut self.mbc {
+                cam.write(addr, val);
+            }
+            return;
+        }
         // HuC1: an IR-mode write drives the LED (ignored); RAM otherwise.
         if let Mbc::Huc1 { ir_mode, .. } = &self.mbc {
             if *ir_mode {
@@ -824,6 +1044,8 @@ impl Cartridge {
             }
             Mbc::Mbc3 { ram_bank, .. } => (*ram_bank & 0x03) as usize,
             Mbc::Mbc5 { ram_bank, .. } => *ram_bank as usize,
+            // Bit 4 means "registers", so it is not part of the bank number.
+            Mbc::Camera { ram_bank, .. } => (*ram_bank & 0x0F) as usize,
             Mbc::Huc1 { ram_bank, .. } => (*ram_bank & 0x03) as usize,
             Mbc::Huc3 { ram_bank, .. } => (*ram_bank & 0x0F) as usize,
             Mbc::None | Mbc::Mbc2 { .. } => 0, // MBC2 handled above
@@ -877,6 +1099,21 @@ impl Cartridge {
         c.bytes(&mut self.ram);
         match &mut self.mbc {
             Mbc::None => {}
+            Mbc::Camera {
+                ram_enabled,
+                rom_bank,
+                ram_bank,
+                cam,
+            } => {
+                c.bool(ram_enabled);
+                c.u8(rom_bank);
+                c.u8(ram_bank);
+                c.u8(&mut cam.trigger);
+                c.i32(&mut cam.busy);
+                for r in cam.regs.iter_mut() {
+                    c.u8(r);
+                }
+            }
             Mbc::Mbc1 {
                 ram_enabled,
                 rom_bank,
@@ -944,6 +1181,8 @@ impl Cartridge {
     /// each tick with the double-speed-adjusted cycle count so the clock always
     /// tracks real time.
     pub fn tick_rtc(&mut self, cycles: u32) {
+        // The camera's exposure runs on the same pulse.
+        self.tick_camera(cycles);
         let footer = match &mut self.mbc {
             Mbc::Mbc3 {
                 has_rtc: true, rtc, ..
