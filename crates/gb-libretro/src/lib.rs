@@ -786,6 +786,26 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     }
     let rom = std::slice::from_raw_parts((*info).data as *const u8, (*info).size).to_vec();
 
+    // Refuse anything too short to hold a cartridge header, BEFORE building a
+    // machine out of it. A frontend shows "failed to load" and the player tries
+    // a different file, which is the right outcome for a truncated download, a
+    // half-written file, or a BIOS dump opened as a game. A full ROM set has
+    // three of those last ones in it, at 256 bytes each.
+    //
+    // The core no longer panics on them either, so this is a refusal rather
+    // than a guard against a crash. It stays because a cartridge assembled out
+    // of padding would boot to a black screen, and "this file is not a Game Boy
+    // ROM" is a better answer than a game that does nothing.
+    if !gb_core::rom_is_loadable(&rom) {
+        with_state(|s| {
+            notify(
+                s,
+                "Not a Game Boy ROM: the file is too small to contain a cartridge header",
+            )
+        });
+        return false;
+    }
+
     with_state(|s| {
         // Ask the host for 32-bit XRGB8888 video.
         if let Some(env) = s.env {

@@ -102,15 +102,52 @@ pub fn mapper_is_supported(cart_type: u8) -> bool {
     !matches!(mbc_kind_of(cart_type).0, MbcKind::Unsupported(_))
 }
 
+/// The smallest file that can contain a cartridge header.
+///
+/// The header runs to `$014F`, so anything shorter is not a cartridge. A real
+/// one is at least 32 KiB, but a short file is the case that matters: it is
+/// what a truncated download, a half-written file or a BIOS dump looks like,
+/// and those reach the core as ordinary `.gb` files a player opened.
+pub const MIN_ROM_LEN: usize = 0x0150;
+
+/// Can this be loaded at all?
+///
+/// A frontend should ask before handing bytes over, and refuse the game rather
+/// than find out during boot. Nothing below is allowed to panic either, but
+/// producing a diagnosable refusal beats producing a cartridge made of padding.
+pub fn rom_is_loadable(rom: &[u8]) -> bool {
+    rom.len() >= MIN_ROM_LEN
+}
+
 impl Header {
+    /// Read one header byte, or `$FF` past the end.
+    ///
+    /// `$FF` because that is what an unmapped read gives on the real bus, and
+    /// because every field below already has to cope with a byte it does not
+    /// recognise: a cartridge type nobody defined, a size code out of range.
+    /// Padding with zero would instead invent a VALID header, claiming ROM
+    /// only, 32 KiB, no RAM, which is a lie that boots.
+    #[inline]
+    fn at(rom: &[u8], i: usize) -> u8 {
+        rom.get(i).copied().unwrap_or(0xFF)
+    }
+
+    /// Never panics, whatever it is handed.
+    ///
+    /// This used to index the slice directly and took the whole app down on a
+    /// 256-byte file: the three Game Boy boot ROMs in a full set are exactly
+    /// that, and so is any truncated download. `retro_load_game` refuses short
+    /// files before reaching here, but a library that panics on untrusted input
+    /// is a library with a crash in it regardless of who calls it politely.
     fn parse(rom: &[u8]) -> Header {
-        let title = rom[0x0134..=0x0143]
+        let title_bytes: Vec<u8> = (0x0134..=0x0143).map(|i| Header::at(rom, i)).collect();
+        let title = title_bytes
             .iter()
             .take_while(|&&b| b != 0)
             .map(|&b| b as char)
             .collect::<String>();
 
-        let cart_type = rom[0x0147];
+        let cart_type = Header::at(rom, 0x0147);
         let (mbc_kind, has_battery) = mbc_kind_of(cart_type);
         // Cart types 0x0F (MBC3+TIMER+BATTERY) and 0x10 (MBC3+TIMER+RAM+BATTERY)
         // are the only ones with the RTC crystal.
@@ -124,10 +161,15 @@ impl Header {
         let has_clock_footer = matches!(cart_type, 0x0F | 0x10 | 0xFE);
 
         // ROM size: 32 KiB << N gives the total size, i.e. 2 << N banks of 16 KiB.
-        let rom_banks = 2usize << rom[0x0148];
+        //
+        // CLAMPED, because the shift is on a byte from the file. $08 is the
+        // largest defined code, 512 banks, and an undefined one used to shift a
+        // usize by up to 255 and panic. Reading a wrong bank count is survivable
+        // since every ROM read is bounds checked; overflowing a shift is not.
+        let rom_banks = 2usize << Header::at(rom, 0x0148).min(0x08);
 
         // RAM size code -> number of 8 KiB banks.
-        let ram_banks = match rom[0x0149] {
+        let ram_banks = match Header::at(rom, 0x0149) {
             0x00 => 0,
             0x01 => 1, // 2 KiB (a partial bank); we round up to one bank
             0x02 => 1,
@@ -146,19 +188,17 @@ impl Header {
             has_rtc,
             has_clock_footer,
             has_rumble,
-            cgb_flag: rom[0x0143],
-            sgb_flag: rom[0x0146],
-            title_checksum: rom[0x0134..=0x0143]
-                .iter()
-                .fold(0u8, |acc, &b| acc.wrapping_add(b)),
-            title_fourth: rom[0x0137],
+            cgb_flag: Header::at(rom, 0x0143),
+            sgb_flag: Header::at(rom, 0x0146),
+            title_checksum: title_bytes.iter().fold(0u8, |acc, &b| acc.wrapping_add(b)),
+            title_fourth: Header::at(rom, 0x0137),
             // The boot ROM only assigns palettes to Nintendo-published games:
             // old licensee 0x33 -> new licensee (0x144/0x145) must be "01",
             // otherwise old licensee must be 0x01.
-            nintendo_licensed: if rom[0x014B] == 0x33 {
-                rom[0x0144] == b'0' && rom[0x0145] == b'1'
+            nintendo_licensed: if Header::at(rom, 0x014B) == 0x33 {
+                Header::at(rom, 0x0144) == b'0' && Header::at(rom, 0x0145) == b'1'
             } else {
-                rom[0x014B] == 0x01
+                Header::at(rom, 0x014B) == 0x01
             },
         }
     }

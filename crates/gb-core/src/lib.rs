@@ -24,7 +24,7 @@ mod sgb;
 mod timer;
 
 pub use link::{packet_len, LinkProto, PROTOCOL_VERSION, TAG_CLOCK, TAG_OUTPUT, TAG_REPLY};
-pub use cartridge::{mapper_is_supported, CAMERA_H, CAMERA_W};
+pub use cartridge::{mapper_is_supported, rom_is_loadable, CAMERA_H, CAMERA_W, MIN_ROM_LEN};
 pub use printer::{packet as printer_packet, stitch, Printer, PrinterHandle, Sheet, Spool};
 pub use serial::{local_pair, LinkCable, LocalLink};
 
