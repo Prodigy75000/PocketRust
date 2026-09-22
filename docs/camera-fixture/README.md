@@ -49,6 +49,27 @@ cargo run --release -p gb-runner --bin shot -- \
     40 out.png "w900,a,w180,a,w180,a,w180"
 ```
 
+## If this scene ever changes
+
+`scene-sensor.bin` is pinned downstream: TH-Android keeps a copy on their test
+classpath so their capture tests do not depend on this repository's working
+tree. That is the right call for them, and it means a silent regeneration here
+would leave both sides passing while neither is checking anything.
+
+So the bytes are hashed, and a test fails if they move:
+
+```
+length   14336
+fnv1a64  0x7296482750806b53
+sha256   ec7bf8600cef9ce210b21e9ccb9afee4e85a8a6d45e56d6d0c08fe4a83ee7de0
+```
+
+Two hashes for two purposes: the FNV is four lines and needs no dependency, so
+the in-repo test can use it; the SHA-256 is there so a downstream copy can be
+verified with any ordinary tool. If you regenerate the scene, update both, and
+tell whoever holds a copy. The test message says so as well, because a promise
+to remember is not a mechanism.
+
 ## The buffer contract
 
 `gb_core::set_camera_frame` takes `CAMERA_W * CAMERA_H` = 128 * 112 = **14336

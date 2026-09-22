@@ -261,3 +261,42 @@ fn the_capture_fixture_still_produces_its_reference_picture() {
     }
     assert_eq!(again.step_frame(), &frame[..], "the same frame gave a different screen");
 }
+
+#[test]
+fn the_fixture_has_not_changed_underneath_its_downstream_copies() {
+    // TH-Android pins a COPY of this fixture on their test classpath, so that
+    // their capture tests do not depend on this repository's working tree. That
+    // is the right call for them and it creates one hazard for me: if the scene
+    // is ever regenerated, their copy silently stops being a check on anything
+    // and both sides keep passing.
+    //
+    // So this is a tripwire rather than a correctness test. It fails when the
+    // bytes change, and the failure message is the reminder to go and say so.
+    // A promise to remember is not a mechanism; this is.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("docs/camera-fixture/scene-sensor.bin");
+    let bytes = std::fs::read(&path).expect("fixture missing");
+
+    // FNV-1a, 64 bit. Chosen because it is four lines and needs no dependency,
+    // and because the README documents the same value so a downstream copy can
+    // be checked by any means. The SHA-256 is there too for the same reason.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in &bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    assert_eq!(bytes.len(), 14336, "the fixture is not a sensor frame any more");
+    assert_eq!(
+        h, 0x7296_4827_5080_6b53,
+        "docs/camera-fixture/scene-sensor.bin has CHANGED.\n\
+         That is allowed, but TH-Android holds a pinned copy on their test \
+         classpath and it will silently stop being a check on this reference.\n\
+         Update the hash here and in docs/camera-fixture/README.md, then TELL \
+         THEM the scene changed."
+    );
+}
