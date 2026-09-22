@@ -162,6 +162,34 @@ from the registers the game writes, which is precisely what makes the in-game
 brightness and contrast sliders do something real. Pre-converting to Game Boy
 shades outside the core would make those controls meaningless.
 
+### Aiming a selfie feels reversed, and that is correct
+
+Do not "fix" it by mirroring. Three reasons, in increasing order of how hard
+they are to argue with.
+
+**No camera mirrors.** A photograph of you shows your right hand on the viewer's
+left, which is the opposite of a mirror, and is why selfies look subtly wrong to
+everyone. Phone front cameras mirror the PREVIEW as a convenience; the file they
+save is unmirrored. So an unmirrored viewfinder is what a real lens pointed at a
+face produces, and it is what the real cartridge produced when its sensor was
+swivelled round.
+
+**Mirroring ruins the artifact.** Any text in shot develops backwards, and it
+develops backwards in a PRINT, which is the thing somebody keeps and shares.
+Aiming is a moment; the print is forever.
+
+**The core could not do it selectively even if it wanted to.** A frontend might
+reasonably propose mirroring the aiming view and un-mirroring the capture. That
+is not possible here: the Game Boy Camera drives a continuous stream of captures
+to paint its viewfinder, one about every few frames (143 measured in one short
+session), and every one of them takes the identical path through
+`camera_develop`. Nothing in the protocol marks the capture the player chooses
+to keep. Mirror the aim and you mirror the print.
+
+The test, if anyone reports the front lens as broken: **hold something written
+up to it.** If the text develops the right way round, the aiming feel is the cost
+we chose and not a bug.
+
 **Frames arrive UNMIRRORED, in sensor orientation.** This is the one that would
 be discovered late and painfully. Phone front cameras conventionally mirror the
 *preview*, because people expect to aim like a mirror. The real Game Boy Camera
