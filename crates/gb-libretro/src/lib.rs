@@ -115,7 +115,7 @@ const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 /// contains.
 #[used]
 static BUILD_FEATURES: &[u8] = concat!(
-    "POCKETRUST_FEATURES:printer,camera,tilt,rumble,gamelink,colorize",
+    "POCKETRUST_FEATURES:printer,camera,tilt,rumble,gamelink,colorize,sgb",
     " build=",
     env!("POCKETRUST_BUILD_ID"),
 )
@@ -124,15 +124,24 @@ static BUILD_FEATURES: &[u8] = concat!(
 /// Core-option key for the DMG colorization toggle (Trophy Hub drives this).
 const OPT_COLORIZE: &CStr = c"pocketrust_colorize";
 const OPT_PRINTER: &CStr = c"pocketrust_printer";
-/// Super Game Boy mode: the cartridge's own palettes, and eventually its
-/// border. Read at LOAD only, never live: a cartridge probes for an SGB during
-/// its first frames and never asks again, so flipping this mid-game could not
-/// make it re-detect. The frontend's copy should say "applies on next launch"
-/// rather than imply otherwise.
-/// Deliberately NOT advertised: see `retro_load_game`. Kept so the key is
-/// recorded in one place if and when the feature is worth exposing.
-#[allow(dead_code)]
+/// Super Game Boy mode: the cartridge's own palettes and its border.
+///
+/// Read at LOAD only, never in `refresh_variables`. A cartridge probes for an
+/// SGB during its first frames and never asks again, so flipping this mid-game
+/// could not make it re-detect and the picture would not change. The
+/// frontend's copy has to say "applies on next launch" rather than imply
+/// otherwise.
 const OPT_SGB: &CStr = c"pocketrust_sgb";
+
+/// The advertised choices for `OPT_SGB`.
+///
+/// Hoisted out of the `vars` array so a test can pin the ORDER. libretro takes
+/// the first value as the default, so writing "on|off" here would silently turn
+/// Super Game Boy on for everybody, resize the picture, and commit the core to
+/// answering a handshake nobody asked for. "Restart" is in the label because a
+/// live change cannot be honoured and a toggle that quietly does nothing looks
+/// broken.
+const OPT_SGB_VALUES: &CStr = c"Super Game Boy border and colours (restart); off|on";
 
 /// `struct retro_message`, for putting a line on the frontend's screen.
 #[repr(C)]
@@ -401,6 +410,10 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
                 value: c"Game Boy Printer on the link port; on|off".as_ptr(),
             },
             retro_variable {
+                key: OPT_SGB.as_ptr(),
+                value: OPT_SGB_VALUES.as_ptr(),
+            },
+            retro_variable {
                 key: ptr::null(),
                 value: ptr::null(),
             },
@@ -416,7 +429,6 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
 
 /// Read the colorize option from the front-end and apply it to the core.
 /// Read one core option, or `default` when the frontend has no opinion.
-#[allow(dead_code)]
 fn read_option(s: &State, key: &CStr, default: &'static str) -> String {
     let Some(env) = s.env else {
         return default.to_string();
@@ -780,24 +792,31 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
         }
     });
 
-    // Super Game Boy, read once here rather than in `refresh_variables`.
+    // Super Game Boy, read once HERE rather than in `refresh_variables`.
     //
-    // Answering the SGB handshake is a commitment: a cartridge that finds an
-    // SGB goes on to send VRAM transfers and expects them to be consumed, and
-    // the implementation is not complete yet. Measured across 5344 cartridges,
-    // turning this on costs 52 that render only with it off. So it is opt-in,
-    // it defaults off, and the default path is byte-for-byte what shipped
-    // before this option existed.
-    // No SGB option is advertised, and none is read. Both halves matter: a
-    // frontend that hid only the control would still have a stored preference
-    // on the wire, so anyone who enabled it in an earlier build would carry a
-    // broken screen into one with no way to switch it off. TH-Android caught
-    // that on their side; this is the same gate on mine.
+    // It defaults off. Answering the handshake is a commitment: a cartridge
+    // that finds an SGB goes on to send VRAM transfers and expects them to be
+    // consumed, and a border changes the size of the picture, so a player who
+    // asked for neither should get neither. With the option unset the default
+    // path is byte-for-byte what shipped before the option existed.
     //
-    // The implementation stays in gb-core behind `GameBoy::set_sgb`, which is
-    // how the runner tools still drive it. It is groundwork, not a feature:
-    // palettes alone are not what anyone wanted from SGB, they are currently
-    // wrong on Pokemon Blue, and answering the handshake costs 52 cartridges.
+    // If this is ever withdrawn again, remove the READ as well as the
+    // advertisement. Hiding only the control leaves a stored preference on the
+    // wire, so anyone who enabled it in an older build keeps getting it with no
+    // way to switch it off. TH-Android hit exactly that on their side.
+    let sgb = with_state(|s| read_option(s, OPT_SGB, "off")) == "on";
+    with_state(|s| {
+        if let Some(gb) = &mut s.gb {
+            gb.set_sgb(sgb);
+        }
+        // A cartridge with no SGB flag in its header ignores the request, so
+        // this reports what the core will actually DO rather than what was
+        // asked for. "I turned it on and nothing happened" otherwise has two
+        // indistinguishable causes.
+        if sgb && s.gb.as_ref().is_some_and(|gb| !gb.supports_sgb()) {
+            notify(s, "Super Game Boy: this cartridge is not SGB enhanced");
+        }
+    });
 
     // Only now, and only for a cartridge that actually has a sensor. A frontend
     // must never be made to raise a camera permission prompt because somebody
@@ -1217,6 +1236,41 @@ mod map_tests {
         assert!(
             id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
             "must survive a strings | grep, got {id:?}"
+        );
+    }
+
+    /// libretro reads the FIRST choice as the default, so the order of these
+    /// two words decides whether Super Game Boy is on for everybody.
+    ///
+    /// Turning it on unasked is not a cosmetic difference: it commits the core
+    /// to answering the handshake and consuming the VRAM transfers that follow,
+    /// and a border changes the picture from 160x144 to 256x224, which the
+    /// frontend then has to lay out. Swapping the words is a one-character
+    /// mistake with none of that visible at the call site.
+    #[test]
+    fn super_game_boy_is_advertised_as_off_by_default() {
+        let s = OPT_SGB_VALUES.to_str().expect("ASCII");
+        let choices = s.split("; ").nth(1).expect("a libretro value is 'label; a|b'");
+        assert_eq!(
+            choices.split('|').next(),
+            Some("off"),
+            "the first choice is the default, got {choices:?}"
+        );
+        // And the label has to warn, because the core reads this at load only.
+        assert!(s.contains("restart"), "a load-time option must say so: {s:?}");
+    }
+
+    /// The core advertises this key and reads it. Both halves or neither: an
+    /// advertisement with no read is a control that does nothing, and a read
+    /// with no advertisement leaves an older build's stored preference on the
+    /// wire with no way to clear it.
+    #[test]
+    fn the_sgb_option_key_is_the_one_the_frontend_was_given() {
+        assert_eq!(OPT_SGB.to_str().unwrap(), "pocketrust_sgb");
+        let features = std::str::from_utf8(BUILD_FEATURES).unwrap();
+        assert!(
+            features.contains("sgb"),
+            "the deploy guard greps this string to prove the feature shipped: {features}"
         );
     }
 

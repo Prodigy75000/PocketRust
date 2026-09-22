@@ -21,6 +21,7 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm`. Pokemon Gold / Silver / Crystal and Harvest Moon |
 | HuC3 clock + IR | ✅ a separate clock in HuC3's own format (minutes since midnight, days) behind its command mailbox, persisted in the `.srm` under its own magic. The IR port answers "no signal", so software polling it gets a quiet line rather than a reply that never comes. Robopon and Pocket Family boot |
 | Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
+| Super Game Boy | ✅ command decoding over the joypad lines, VRAM transfers read off the rendered frame, palettes, per-tile attributes, and the **decorative border** composed into a 256x224 frame (`docs/SGB.md`). Opt-in via `pocketrust_sgb`, off by default and read at load only. Sound commands and SNES-side uploaded programs are not implemented |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and GameLink sessions over the libretro netpacket interface (`pocketrust-link-4`) |
 | Game Boy Printer | ✅ full packet protocol on the link port, including RLE; pages joined on the printer's own margins and written as PNG (`docs/PRINTER.md`). Verified against Pokemon Yellow printing a Pokedex entry |

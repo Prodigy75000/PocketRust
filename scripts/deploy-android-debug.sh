@@ -61,7 +61,10 @@ echo "Checking the build actually contains what it should:"
 # exist if particular features were compiled in. The list is the reliable one:
 # the Game Boy Camera's mapper has no string literal of its own, so before
 # BUILD_FEATURES existed there was no way to prove it was in a binary at all.
-for marker in POCKETRUST_FEATURES: printer camera tilt rumble gamelink pocketrust_printer /printer "build=$build_id"; do
+# A marker only guards what it names, so every feature that ships has to be
+# added here. This list has silently lagged twice, for rumble and then for SGB:
+# the guard passed a binary that did not contain the thing being tested.
+for marker in POCKETRUST_FEATURES: printer camera tilt rumble gamelink colorize sgb               pocketrust_printer pocketrust_sgb /printer "build=$build_id"; do
     if grep -qa -- "$marker" "$SO"; then
         echo "  ok       $marker"
     else
