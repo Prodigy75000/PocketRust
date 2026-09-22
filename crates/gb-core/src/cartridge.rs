@@ -43,6 +43,9 @@ pub enum MbcKind {
     Huc3,
     /// The Game Boy Camera's MAC-GBD. A mapper with an image sensor on it.
     Camera,
+    /// Kirby Tilt 'n' Tumble's mapper: a two-axis accelerometer and a
+    /// serial EEPROM instead of ordinary cartridge RAM.
+    Mbc7,
     Unsupported(u8),
 }
 
@@ -65,6 +68,11 @@ fn mbc_kind_of(cart_type: u8) -> (MbcKind, bool) {
         0x19..=0x1E => (MbcKind::Mbc5, matches!(cart_type, 0x1B | 0x1E)),
         // The Game Boy Camera: 1 MB ROM, 128 KB battery RAM for the photo
         // album, and an M64282FP sensor reachable through the RAM window.
+        // MBC7: tilt sensor plus a 93LC56 EEPROM. The battery is on the
+        // EEPROM rather than on RAM, and the header declares NO cartridge
+        // RAM at all ($0149 is $00), which is why the save has to be
+        // allocated from the mapper rather than from the size byte.
+        0x22 => (MbcKind::Mbc7, true),
         0xFC => (MbcKind::Camera, true),
         0xFE => (MbcKind::Huc3, true), // HuC3: RAM + RTC + battery
         0xFF => (MbcKind::Huc1, true), // HuC1: RAM + battery (+ IR)
@@ -328,6 +336,291 @@ impl Cam {
     }
 }
 
+/// The MBC7's two-axis accelerometer.
+///
+/// Both axes read `$8000` at rest and before they have ever been latched, and
+/// Earth's gravity moves a value by about `$70`. The game latches by writing
+/// `$55` to `$Ax0x` and then `$AA` to `$Ax1x`; anything else leaves the last
+/// latched reading in place, so a game that forgets to latch keeps reading the
+/// same numbers rather than seeing them drift.
+#[derive(Clone)]
+struct Accel {
+    /// What the host says the console is tilted by, in g.
+    tilt_x: f32,
+    tilt_y: f32,
+    /// The latched values the game actually reads.
+    x: u16,
+    y: u16,
+    /// Has `$55` been seen, so that `$AA` will latch?
+    armed: bool,
+}
+
+/// One g, as the accelerometer reports it.
+const ACCEL_G: f32 = 0x70 as f32;
+/// Both axes with the console held level.
+///
+/// NOT $8000, which is the tempting value and the wrong one. $8000 is what the
+/// registers read *before the first latch* and after an erase; a latched
+/// reading of a level console is $81D0. Getting this wrong is silent: the
+/// mapper works, the game polls it once a frame and reads exactly the numbers
+/// handed to it, and nothing moves, because every reading is 464 counts from
+/// where the game calibrated and 464 counts is four g of impossible tilt.
+const ACCEL_REST: u16 = 0x81D0;
+/// What the registers read before the first latch, and after an erase.
+const ACCEL_ERASED: u16 = 0x8000;
+
+impl Accel {
+    fn new() -> Accel {
+        Accel {
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+            x: ACCEL_ERASED,
+            y: ACCEL_ERASED,
+            armed: false,
+        }
+    }
+
+    fn latch(&mut self) {
+        let map = |g: f32| -> u16 {
+            // Negated, and measured rather than assumed. The register reads
+            // BELOW rest as the console tilts toward the positive screen axes:
+            // driving X below $81D0 rolls Kirby right, and Y below it rolls
+            // him down. Handing the raw sign straight through would give a
+            // core that is demonstrably working and plays backwards.
+            let v = ACCEL_REST as f32 - g * ACCEL_G;
+            v.clamp(0.0, 65535.0) as u16
+        };
+        self.x = map(self.tilt_x);
+        self.y = map(self.tilt_y);
+    }
+}
+
+/// The 93LC56 serial EEPROM: 128 words of 16 bits, which is the 256 bytes of
+/// save this cartridge has instead of RAM.
+///
+/// The game bit-bangs it through one byte at `$Ax8x`:
+///
+/// ```text
+///   bit 7  CS    chip select
+///   bit 6  CLK   clock; the state machine advances on a RISING edge
+///   bit 1  DI    data in, from the game
+///   bit 0  DO    data out, to the game
+/// ```
+///
+/// A command is a start bit, then two opcode bits, then eight address bits of
+/// which only the low seven are significant, because 128 words need seven. A
+/// write follows with sixteen data bits. Opcode `00` is the odd one out: its
+/// top two address bits pick between enabling writes, disabling them, and the
+/// bulk operations.
+///
+/// Writes are ignored unless they have been enabled, which is not a detail to
+/// skip: the game disables them again after saving, and a mapper that always
+/// allowed writes would let a crash scribble on the save.
+#[derive(Clone)]
+struct Eeprom {
+    cs: bool,
+    clk: bool,
+    /// The last DI the game drove. Kept because the game reads this port back
+    /// and rewrites it with one bit changed, so inventing a value here feeds a
+    /// bit of our own into its next clock.
+    di: bool,
+    do_bit: bool,
+    /// Bits shifted in since chip select rose.
+    shift: u32,
+    bits: u8,
+    /// What is being done, once the command has been decoded.
+    state: EeState,
+    addr: usize,
+    /// Bits waiting to be shifted out, most significant first.
+    out: u32,
+    out_bits: u8,
+    write_enabled: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EeState {
+    /// Waiting for the start bit.
+    Idle,
+    /// Collecting opcode and address.
+    Command,
+    /// Collecting the sixteen data bits of a write.
+    WriteData,
+    /// Shifting a word out.
+    Reading,
+}
+
+impl Eeprom {
+    fn new() -> Eeprom {
+        Eeprom {
+            cs: false,
+            clk: false,
+            di: false,
+            do_bit: true,
+            shift: 0,
+            bits: 0,
+            state: EeState::Idle,
+            addr: 0,
+            out: 0,
+            out_bits: 0,
+            write_enabled: false,
+        }
+    }
+
+    fn read(&self) -> u8 {
+        // CS, CLK and DI read back as written; DO is ours.
+        let mut v = 0u8;
+        if self.cs {
+            v |= 0x80;
+        }
+        if self.clk {
+            v |= 0x40;
+        }
+        if self.di {
+            v |= 0x02;
+        }
+        if self.do_bit {
+            v |= 0x01;
+        }
+        v
+    }
+
+    /// `ram` is the 256 bytes of save, read and written as big-endian words.
+    fn write(&mut self, val: u8, ram: &mut [u8]) {
+        let cs = val & 0x80 != 0;
+        let clk = val & 0x40 != 0;
+        let di = val & 0x02 != 0;
+        self.di = di;
+
+        if !cs {
+            // Chip deselected: abandon whatever was in progress. The enable
+            // latch survives, which is what the real part does.
+            self.cs = false;
+            self.clk = clk;
+            self.state = EeState::Idle;
+            self.bits = 0;
+            self.shift = 0;
+            self.do_bit = true;
+            return;
+        }
+
+        let rising = cs && clk && !self.clk;
+        self.cs = cs;
+        self.clk = clk;
+        if !rising {
+            return;
+        }
+
+        match self.state {
+            EeState::Idle => {
+                // Leading zeroes are ignored; a one is the start bit.
+                if di {
+                    self.state = EeState::Command;
+                    self.shift = 0;
+                    self.bits = 0;
+                }
+            }
+            EeState::Command => {
+                self.shift = (self.shift << 1) | di as u32;
+                self.bits += 1;
+                if self.bits == 10 {
+                    self.decode(ram);
+                }
+            }
+            EeState::WriteData => {
+                self.shift = (self.shift << 1) | di as u32;
+                self.bits += 1;
+                if self.bits == 16 {
+                    if self.write_enabled {
+                        let w = self.shift as u16;
+                        let at = (self.addr & 0x7F) * 2;
+                        if at + 1 < ram.len() {
+                            ram[at] = (w >> 8) as u8;
+                            ram[at + 1] = w as u8;
+                        }
+                    }
+                    self.state = EeState::Idle;
+                    self.bits = 0;
+                    self.shift = 0;
+                    // Ready again, which the game polls for.
+                    self.do_bit = true;
+                }
+            }
+            EeState::Reading => {
+                self.out_bits = self.out_bits.saturating_sub(1);
+                self.do_bit = (self.out >> self.out_bits) & 1 != 0;
+                if self.out_bits == 0 {
+                    self.state = EeState::Idle;
+                }
+            }
+        }
+    }
+
+    /// Ten bits gathered: two of opcode and eight of address.
+    fn decode(&mut self, ram: &mut [u8]) {
+        let op = (self.shift >> 8) & 0b11;
+        let addr = (self.shift & 0xFF) as usize;
+        self.addr = addr & 0x7F;
+        self.bits = 0;
+        self.shift = 0;
+
+        match op {
+            0b10 => {
+                // READ. A dummy zero leads the word out, which is why the
+                // shift register is seventeen bits wide here.
+                let at = self.addr * 2;
+                let w = if at + 1 < ram.len() {
+                    ((ram[at] as u32) << 8) | ram[at + 1] as u32
+                } else {
+                    0xFFFF
+                };
+                self.out = w << 1;
+                self.out_bits = 17;
+                self.do_bit = false;
+                self.state = EeState::Reading;
+            }
+            0b01 => {
+                self.state = EeState::WriteData;
+                self.do_bit = false; // busy until the word lands
+            }
+            0b11 => {
+                // ERASE one word.
+                if self.write_enabled {
+                    let at = self.addr * 2;
+                    if at + 1 < ram.len() {
+                        ram[at] = 0xFF;
+                        ram[at + 1] = 0xFF;
+                    }
+                }
+                self.state = EeState::Idle;
+                self.do_bit = true;
+            }
+            _ => {
+                // Opcode 00: the top two address bits say which.
+                match addr >> 6 {
+                    0b11 => self.write_enabled = true,  // EWEN
+                    0b00 => self.write_enabled = false, // EWDS
+                    0b10 => {
+                        // ERAL, erase the whole chip.
+                        if self.write_enabled {
+                            ram.fill(0xFF);
+                        }
+                    }
+                    _ => {
+                        // WRAL, write the whole chip. Rare enough that taking
+                        // the data and ignoring it is honest: no game we have
+                        // uses it, and silently doing nothing is better than
+                        // silently doing it wrong.
+                        self.state = EeState::WriteData;
+                        return;
+                    }
+                }
+                self.state = EeState::Idle;
+                self.do_bit = true;
+            }
+        }
+    }
+}
+
 enum Mbc {
     None,
     Mbc1 {
@@ -363,6 +656,15 @@ enum Mbc {
         rom_bank: u8, // 7 bits
         ram_bank: u8, // 4 bits
         huc3: Huc3,   // mode register + RTC/config command MCU
+    },
+    Mbc7 {
+        /// MBC7 has TWO enables and wants both: $0A to $0000-$1FFF and $40 to
+        /// $4000-$5FFF. One alone leaves the register block dead.
+        ram_enable_1: bool,
+        ram_enable_2: bool,
+        rom_bank: u8, // 7 bits
+        accel: Accel,
+        eeprom: Eeprom,
     },
     Camera {
         ram_enabled: bool,
@@ -718,6 +1020,26 @@ impl Cartridge {
         // else uses the header-declared bank count.
         let ram = if header.mbc_kind == MbcKind::Mbc2 {
             vec![0u8; 512]
+        } else if header.mbc_kind == MbcKind::Mbc7 {
+            // MBC7's save is a 93LC56 EEPROM: 128 words of 16 bits, and the
+            // header declares no cartridge RAM at all. Sized exactly, because
+            // this is the file the frontend writes out, and every other
+            // emulator of this mapper produces 256 bytes. An 8 KiB save padded
+            // with zeroes would not load anywhere else.
+            //
+            // Zeroed, NOT erased-to-ones, and that is measured rather than
+            // reasoned. An erased 93LC56 reads $FF, so all-ones looks like the
+            // honest hardware answer. It is not what this game wants: filled
+            // with $FF, Kirby's file select shows three fabricated saves
+            // reading "LEVEL 8-4 255%", and it does not offer to format them.
+            // Filled with $00 it shows "NO DATA", which is what somebody
+            // opening a new cartridge sees.
+            //
+            // So the game treats zero as empty and anything else as a save,
+            // and a real cartridge cannot have shipped reading $FF. Beyond
+            // looking wrong, a fabricated 100%-complete file is exactly the
+            // kind of garbage state that false-unlocks achievements.
+            vec![0x00u8; 256]
         } else {
             // RTC carts append a footer past the game-visible RAM so the clock
             // rides along in the battery save. The MBC never maps into it.
@@ -747,6 +1069,13 @@ impl Cartridge {
                 ram_enabled: false,
                 rom_bank: 1,
                 ram_bank: 0,
+            },
+            MbcKind::Mbc7 => Mbc::Mbc7 {
+                ram_enable_1: false,
+                ram_enable_2: false,
+                rom_bank: 1,
+                accel: Accel::new(),
+                eeprom: Eeprom::new(),
             },
             MbcKind::Camera => Mbc::Camera {
                 ram_enabled: false,
@@ -830,6 +1159,17 @@ impl Cartridge {
                 let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
                 *self.rom.get(offset).unwrap_or(&0xFF)
             }
+            Mbc::Mbc7 { rom_bank, .. } => {
+                // Seven bits. Bank 0 in the high window reads as bank 1, the
+                // same as MBC1 and MBC3.
+                let bank = if addr < 0x4000 {
+                    0
+                } else {
+                    ((*rom_bank as usize).max(1)) & (self.header.rom_banks - 1)
+                };
+                let offset = bank * 0x4000 + (addr as usize & 0x3FFF);
+                *self.rom.get(offset).unwrap_or(&0xFF)
+            }
             // The camera's mapper takes $00-$3F and, unlike MBC1, the
             // documentation says nothing about remapping bank 0, so bank 0 is
             // selectable into the high window the way MBC5 allows.
@@ -859,6 +1199,20 @@ impl Cartridge {
     pub fn write_rom(&mut self, addr: u16, val: u8) {
         match &mut self.mbc {
             Mbc::None => {}
+            Mbc::Mbc7 {
+                ram_enable_1,
+                ram_enable_2,
+                rom_bank,
+                ..
+            } => match addr {
+                // Two separate enables, and the register block at $A000 wants
+                // BOTH. This is the one mapper here where a single enable is
+                // not sufficient.
+                0x0000..=0x1FFF => *ram_enable_1 = val == 0x0A,
+                0x2000..=0x3FFF => *rom_bank = val & 0x7F,
+                0x4000..=0x5FFF => *ram_enable_2 = val == 0x40,
+                _ => {}
+            },
             Mbc::Camera {
                 ram_enabled,
                 rom_bank,
@@ -946,6 +1300,80 @@ impl Cartridge {
                 0x4000..=0x5FFF => *ram_bank = val & 0x0F,
                 _ => {}
             },
+        }
+    }
+
+    /// MBC7's register block at $A000-$BFFF.
+    ///
+    /// Separate from `write_ram` because the EEPROM writes into the save, and
+    /// that cannot be done while the mapper itself is mutably borrowed out of
+    /// `self`.
+    fn mbc7_write(&mut self, addr: u16, val: u8) {
+        let enabled = match &self.mbc {
+            Mbc::Mbc7 {
+                ram_enable_1,
+                ram_enable_2,
+                ..
+            } => *ram_enable_1 && *ram_enable_2,
+            _ => return,
+        };
+        if !enabled {
+            return;
+        }
+
+        let reg = (addr >> 4) & 0xF;
+
+        // Destructured so the EEPROM can hold `ram` while the mapper holds
+        // `mbc`: they are distinct fields, so the borrow checker allows it,
+        // where `self.mbc` and `self.ram` together would not.
+        let Cartridge { mbc, ram, .. } = self;
+        if let Mbc::Mbc7 { accel, eeprom, .. } = mbc {
+            if reg == 0x8 {
+                eeprom.write(val, ram);
+                return;
+            }
+            match reg {
+                // $55 arms the latch, $AA fires it. Anything else leaves the
+                // previous reading alone, so a game that forgets to latch keeps
+                // reading the same numbers rather than watching them drift.
+                0x0 => {
+                    if val == 0x55 {
+                        accel.x = ACCEL_ERASED;
+                        accel.y = ACCEL_ERASED;
+                        accel.armed = true;
+                    }
+                }
+                0x1 => {
+                    if val == 0xAA && accel.armed {
+                        accel.latch();
+                        accel.armed = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Does this cartridge have a tilt sensor on it?
+    pub fn has_tilt(&self) -> bool {
+        matches!(self.mbc, Mbc::Mbc7 { .. })
+    }
+
+    /// Tell the accelerometer how the console is being held, in g per axis,
+    /// in SCREEN coordinates: positive x rolls Kirby right, positive y rolls
+    /// him down.
+    ///
+    /// Stored rather than applied: the game decides when to sample, by writing
+    /// $55 then $AA, and reads the values latched at that moment. So a frontend
+    /// can push as often as it likes without the reading changing under a game
+    /// that is midway through reading it.
+    pub fn set_tilt(&mut self, x_g: f32, y_g: f32) -> bool {
+        if let Mbc::Mbc7 { accel, .. } = &mut self.mbc {
+            accel.tilt_x = x_g;
+            accel.tilt_y = y_g;
+            true
+        } else {
+            false
         }
     }
 
@@ -1101,6 +1529,13 @@ impl Cartridge {
             | Mbc::Mbc2 { ram_enabled, .. }
             | Mbc::Mbc3 { ram_enabled, .. }
             | Mbc::Mbc5 { ram_enabled, .. } => *ram_enabled,
+            // MBC7 wants both of its enables before the register block
+            // answers at all.
+            Mbc::Mbc7 {
+                ram_enable_1,
+                ram_enable_2,
+                ..
+            } => *ram_enable_1 && *ram_enable_2,
             // The camera's REGISTERS are always reachable; only the photo
             // album behind them needs enabling. The register case never gets
             // this far, so this is only ever asked about RAM.
@@ -1120,6 +1555,30 @@ impl Cartridge {
             if let Mbc::Camera { cam, .. } = &self.mbc {
                 return cam.read(addr);
             }
+        }
+        // MBC7's whole $A000-$BFFF window is registers, not memory, and which
+        // register is chosen by the SECOND nibble of the address: the block is
+        // mirrored every sixteen bytes across the window.
+        if let Mbc::Mbc7 {
+            accel,
+            eeprom,
+            ram_enable_1,
+            ram_enable_2,
+            ..
+        } = &self.mbc
+        {
+            if !(*ram_enable_1 && *ram_enable_2) {
+                return 0xFF;
+            }
+            return match (addr >> 4) & 0xF {
+                0x2 => accel.x as u8,
+                0x3 => (accel.x >> 8) as u8,
+                0x4 => accel.y as u8,
+                0x5 => (accel.y >> 8) as u8,
+                0x6 => 0x00,
+                0x8 => eeprom.read(),
+                _ => 0xFF,
+            };
         }
         // HuC1: the IR window reads back "no signal"; otherwise it is RAM.
         if let Mbc::Huc1 { ir_mode: true, .. } = &self.mbc {
@@ -1169,6 +1628,10 @@ impl Cartridge {
             if let Mbc::Camera { cam, .. } = &mut self.mbc {
                 cam.write(addr, val);
             }
+            return;
+        }
+        if let Mbc::Mbc7 { .. } = &self.mbc {
+            self.mbc7_write(addr, val);
             return;
         }
         // HuC1: an IR-mode write drives the LED (ignored); RAM otherwise.
@@ -1243,7 +1706,10 @@ impl Cartridge {
             Mbc::Camera { ram_bank, .. } => (*ram_bank & 0x0F) as usize,
             Mbc::Huc1 { ram_bank, .. } => (*ram_bank & 0x03) as usize,
             Mbc::Huc3 { ram_bank, .. } => (*ram_bank & 0x0F) as usize,
-            Mbc::None | Mbc::Mbc2 { .. } => 0, // MBC2 handled above
+            // MBC7 has no banked cartridge RAM at all: its whole $A000 window
+            // is registers, and its 256 save bytes are the EEPROM, indexed by
+            // word address rather than by this path.
+            Mbc::None | Mbc::Mbc2 { .. } | Mbc::Mbc7 { .. } => 0, // MBC2 handled above
         };
         // Guard against carts that report no RAM banks.
         let banks = self.header.ram_banks.max(1);
@@ -1294,6 +1760,39 @@ impl Cartridge {
         c.bytes(&mut self.ram);
         match &mut self.mbc {
             Mbc::None => {}
+            Mbc::Mbc7 {
+                ram_enable_1,
+                ram_enable_2,
+                rom_bank,
+                accel,
+                eeprom,
+            } => {
+                c.bool(ram_enable_1);
+                c.bool(ram_enable_2);
+                c.u8(rom_bank);
+                c.u16(&mut accel.x);
+                c.u16(&mut accel.y);
+                c.bool(&mut accel.armed);
+                // The EEPROM's own bit-level state. A save state taken in the
+                // middle of a word has to come back in the middle of that word,
+                // or the game's next clock edge lands somewhere else entirely.
+                c.bool(&mut eeprom.cs);
+                c.bool(&mut eeprom.clk);
+                c.bool(&mut eeprom.do_bit);
+                c.u32(&mut eeprom.shift);
+                c.u8(&mut eeprom.bits);
+                c.u32(&mut eeprom.out);
+                c.u8(&mut eeprom.out_bits);
+                c.bool(&mut eeprom.write_enabled);
+                let mut st = eeprom.state as u8;
+                c.u8(&mut st);
+                eeprom.state = match st {
+                    1 => EeState::Command,
+                    2 => EeState::WriteData,
+                    3 => EeState::Reading,
+                    _ => EeState::Idle,
+                };
+            }
             Mbc::Camera {
                 ram_enabled,
                 rom_bank,
@@ -1776,5 +2275,172 @@ mod tests {
         huc3_exec(&mut cart2, 0x10);
         cart2.write_rom(0x0000, 0x0C);
         assert_eq!(cart2.read_ram(0xA000) & 0x0F, 5, "minutes low nibble restored");
+    }
+}
+
+#[cfg(test)]
+mod mbc7_tests {
+    use super::*;
+
+    /// Drive the EEPROM's pins the way the game does: one write per pin state,
+    /// clocking each bit in with a low-then-high pair.
+    struct Pins {
+        ee: Eeprom,
+        ram: Vec<u8>,
+        cs: bool,
+    }
+
+    impl Pins {
+        fn new() -> Pins {
+            Pins {
+                ee: Eeprom::new(),
+                ram: vec![0x00; 256],
+                cs: false,
+            }
+        }
+
+        fn poke(&mut self, cs: bool, clk: bool, di: bool) {
+            let v = (cs as u8) << 7 | (clk as u8) << 6 | (di as u8) << 1;
+            self.ee.write(v, &mut self.ram);
+        }
+
+        fn select(&mut self) {
+            self.cs = true;
+            self.poke(true, false, false);
+        }
+
+        fn deselect(&mut self) {
+            self.cs = false;
+            self.poke(false, false, false);
+        }
+
+        /// Clock one bit in, and return the DO bit the part presents after it.
+        fn bit(&mut self, di: bool) -> bool {
+            self.poke(self.cs, false, di);
+            self.poke(self.cs, true, di);
+            self.ee.read() & 0x01 != 0
+        }
+
+        fn send(&mut self, val: u32, n: u8) {
+            for i in (0..n).rev() {
+                self.bit((val >> i) & 1 != 0);
+            }
+        }
+
+        /// Start bit, two opcode bits, eight address bits.
+        fn command(&mut self, op: u32, addr: u32) {
+            self.select();
+            self.bit(true);
+            self.send(op, 2);
+            self.send(addr, 8);
+        }
+
+        fn ewen(&mut self) {
+            self.command(0b00, 0b11 << 6);
+            self.deselect();
+        }
+
+        fn write_word(&mut self, addr: u32, word: u16) {
+            self.command(0b01, addr);
+            self.send(word as u32, 16);
+            self.deselect();
+        }
+
+        fn read_word(&mut self, addr: u32) -> u16 {
+            self.command(0b10, addr);
+            let mut w = 0u16;
+            for _ in 0..16 {
+                w = (w << 1) | self.bit(false) as u16;
+            }
+            self.deselect();
+            w
+        }
+    }
+
+    #[test]
+    fn eeprom_round_trips_a_word() {
+        let mut p = Pins::new();
+        p.ewen();
+        p.write_word(0x05, 0xBEEF);
+        assert_eq!(p.read_word(0x05), 0xBEEF, "a written word must read back");
+    }
+
+    #[test]
+    fn eeprom_words_are_big_endian_in_the_save() {
+        // The save file is shared with other emulators of this mapper, so the
+        // byte order inside it is a compatibility contract, not a free choice.
+        let mut p = Pins::new();
+        p.ewen();
+        p.write_word(0x00, 0x1234);
+        assert_eq!(&p.ram[0..2], &[0x12, 0x34]);
+    }
+
+    #[test]
+    fn eeprom_ignores_writes_until_enabled() {
+        let mut p = Pins::new();
+        // Deliberately no EWEN.
+        p.write_word(0x02, 0xAAAA);
+        assert_eq!(p.read_word(0x02), 0x0000, "a disabled write must not land");
+        p.ewen();
+        p.write_word(0x02, 0xAAAA);
+        assert_eq!(p.read_word(0x02), 0xAAAA);
+    }
+
+    #[test]
+    fn eeprom_ewds_disables_again() {
+        let mut p = Pins::new();
+        p.ewen();
+        p.write_word(0x03, 0x1111);
+        p.command(0b00, 0b00 << 6); // EWDS
+        p.deselect();
+        p.write_word(0x03, 0x2222);
+        assert_eq!(p.read_word(0x03), 0x1111, "EWDS must re-lock the part");
+    }
+
+    #[test]
+    fn eeprom_addresses_wrap_at_128_words() {
+        // Seven significant address bits, so bit 7 is ignored. Honouring it
+        // would index past the 256-byte save.
+        let mut p = Pins::new();
+        p.ewen();
+        p.write_word(0x01, 0xCAFE);
+        assert_eq!(p.read_word(0x81), 0xCAFE);
+    }
+
+    #[test]
+    fn eeprom_erase_sets_a_word_to_ones() {
+        let mut p = Pins::new();
+        p.ewen();
+        p.write_word(0x07, 0x0000);
+        p.command(0b11, 0x07); // ERASE
+        p.deselect();
+        assert_eq!(p.read_word(0x07), 0xFFFF);
+    }
+
+    #[test]
+    fn accelerometer_reads_centre_until_latched() {
+        let mut a = Accel::new();
+        a.tilt_x = 1.0;
+        // No latch yet: the game must see the erased value, not the new tilt,
+        // and the erased value is not the resting one.
+        assert_eq!(a.x, ACCEL_ERASED);
+        assert_ne!(ACCEL_ERASED, ACCEL_REST);
+        a.latch();
+        assert_eq!(a.x, ACCEL_REST - 0x70);
+    }
+
+    #[test]
+    fn accelerometer_tilts_both_ways_and_clamps() {
+        let mut a = Accel::new();
+        a.tilt_x = -1.0;
+        a.tilt_y = 2.0;
+        a.latch();
+        assert_eq!(a.x, ACCEL_REST + 0x70);
+        assert_eq!(a.y, ACCEL_REST - 0xE0);
+        // Far past anything physical: must saturate, not wrap. A wrap would
+        // read as a hard tilt the other way.
+        a.tilt_x = 1000.0;
+        a.latch();
+        assert_eq!(a.x, 0);
     }
 }

@@ -14,7 +14,8 @@
 //!
 //!   ... -- demo.gbc 60 shot.png down,down,a,w120
 
-use gb_core::{Button, GameBoy, SCREEN_H, SCREEN_W};
+use gb_core::{GameBoy, SCREEN_H, SCREEN_W};
+use gb_runner::play;
 use std::fs::File;
 use std::io::BufWriter;
 
@@ -105,55 +106,6 @@ fn main() {
         .write_image_data(&rgb)
         .unwrap();
     println!("Wrote {out}");
-}
-
-/// Play an input script. Anything it does not recognise is a hard error rather
-/// than a silent skip, because a typo in a screenshot recipe would otherwise
-/// produce a plausible picture of the wrong screen.
-fn play(gb: &mut GameBoy, script: &str) {
-    for token in script.split(',') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        if let Some(n) = token.strip_prefix('w') {
-            let n: u32 = n.parse().unwrap_or_else(|_| panic!("bad wait {token:?}"));
-            for _ in 0..n {
-                gb.step_frame();
-            }
-            continue;
-        }
-        let (name, action) = match token.as_bytes()[0] {
-            b'+' => (&token[1..], 1),
-            b'-' => (&token[1..], 2),
-            _ => (token, 0),
-        };
-        let button = match name {
-            "a" => Button::A,
-            "b" => Button::B,
-            "up" => Button::Up,
-            "down" => Button::Down,
-            "left" => Button::Left,
-            "right" => Button::Right,
-            "start" => Button::Start,
-            "select" => Button::Select,
-            other => panic!("no such button {other:?}"),
-        };
-        match action {
-            1 => gb.set_button(button, true),
-            2 => gb.set_button(button, false),
-            _ => {
-                gb.set_button(button, true);
-                for _ in 0..6 {
-                    gb.step_frame();
-                }
-                gb.set_button(button, false);
-                for _ in 0..6 {
-                    gb.step_frame();
-                }
-            }
-        }
-    }
 }
 
 /// Load any PNG and squash it to the sensor's 128x112 greyscale.

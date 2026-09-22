@@ -197,6 +197,34 @@ impl GameBoy {
         self.mmu.cartridge.set_camera_frame(gray)
     }
 
+    /// Does this cartridge have a tilt sensor on it? (MBC7: Kirby Tilt 'n'
+    /// Tumble, Command Master.)
+    pub fn has_tilt(&self) -> bool {
+        self.mmu.cartridge.has_tilt()
+    }
+
+    /// Tilt the console, in g per axis.
+    ///
+    /// Axes are SCREEN coordinates, which is the convention worth stating
+    /// because the hardware register's own is the opposite one: positive `x_g`
+    /// rolls the ball RIGHT, positive `y_g` rolls it DOWN the screen. So
+    /// lowering the right-hand edge of the device is `+x`, and lowering the
+    /// edge nearest the player is `+y`. One g is the full pull of gravity:
+    /// flat on a table is `(0.0, 0.0)`, and on its side is 1.0.
+    ///
+    /// Measured against the cartridge rather than derived: at `+1.0` x the
+    /// camera scrolls right, at `-1.0` it scrolls left, and Kirby's own hint
+    /// screen ("tilt forward to make Kirby roll") appears for `-y`.
+    ///
+    /// Values past the sensor's range saturate rather than wrapping. A wrap
+    /// would read as a hard tilt the other way and throw the ball off the
+    /// stage, which is the worst possible failure for an input this direct.
+    ///
+    /// Returns false if this cartridge has no tilt sensor.
+    pub fn set_tilt(&mut self, x_g: f32, y_g: f32) -> bool {
+        self.mmu.cartridge.set_tilt(x_g, y_g)
+    }
+
     /// Battery-backed cartridge RAM, for save persistence by the frontend.
     pub fn sram(&self) -> &[u8] {
         self.mmu.cartridge.ram()
@@ -260,6 +288,15 @@ impl GameBoy {
     /// Used by the test harness to read Blargg's in-memory result protocol.
     pub fn peek(&self, addr: u16) -> u8 {
         self.mmu.read(addr)
+    }
+
+    /// Write a byte to the bus, exactly as the guest would.
+    ///
+    /// For tests and tools that need to drive a mapper directly rather than
+    /// through several minutes of gameplay. This is a real bus write, so mapper
+    /// side effects happen: that is the point of it.
+    pub fn poke(&mut self, addr: u16, val: u8) {
+        self.mmu.write(addr, val);
     }
 
     /// Debug: (SGB commands seen as (code, data_len), whether SGB is active,
