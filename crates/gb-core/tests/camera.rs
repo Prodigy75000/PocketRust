@@ -188,3 +188,76 @@ fn a_frame_of_the_wrong_size_is_refused() {
     );
     assert!(gb.set_camera_frame(&vec![0u8; gb_core::CAMERA_W * gb_core::CAMERA_H]));
 }
+
+#[test]
+fn the_capture_fixture_still_produces_its_reference_picture() {
+    // The external reference a frontend checks its capture path against. Every
+    // check a frontend can run on its own proves its pipeline is
+    // self-consistent, not that it is correct; this is the thing outside it.
+    //
+    // The frame is stored as RAW BYTES rather than a PNG, because raw bytes are
+    // exactly what `set_camera_frame` takes. No decoding, nothing to get wrong
+    // between the fixture and the contract it documents.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("docs/camera-fixture");
+    let sensor = std::fs::read(dir.join("scene-sensor.bin")).expect("fixture missing");
+    assert_eq!(
+        sensor.len(),
+        gb_core::CAMERA_W * gb_core::CAMERA_H,
+        "the fixture is not a sensor frame"
+    );
+
+    let Some(mut gb) = boot() else { return };
+    assert!(gb.set_camera_frame(&sensor));
+    for _ in 0..3 {
+        gb.set_button(gb_core::Button::A, true);
+        for _ in 0..8 {
+            gb.step_frame();
+        }
+        gb.set_button(gb_core::Button::A, false);
+        for _ in 0..172 {
+            gb.step_frame();
+        }
+    }
+    let frame = gb.step_frame().to_vec();
+
+    let mut shades = std::collections::HashSet::new();
+    let mut dark = 0usize;
+    for y in 24..120 {
+        for x in 24..120 {
+            let p = frame[y * 160 + x];
+            shades.insert(p);
+            if ((p >> 16 & 0xff) + (p >> 8 & 0xff) + (p & 0xff)) / 3 < 128 {
+                dark += 1;
+            }
+        }
+    }
+    assert_eq!(shades.len(), 4, "the viewfinder should use all four shades");
+    let coverage = dark as f32 / (96.0 * 96.0);
+    assert!(
+        (0.10..0.70).contains(&coverage),
+        "{:.0}% ink; the fixture should be a picture, not a blank or a blackout",
+        coverage * 100.0
+    );
+
+    // Deterministic: the same frame twice gives the same screen. That is what
+    // lets the committed reference PNG be an exact expectation rather than a
+    // rough one, and it is what a frontend is comparing against.
+    let mut again = boot().unwrap();
+    assert!(again.set_camera_frame(&sensor));
+    for _ in 0..3 {
+        again.set_button(gb_core::Button::A, true);
+        for _ in 0..8 {
+            again.step_frame();
+        }
+        again.set_button(gb_core::Button::A, false);
+        for _ in 0..172 {
+            again.step_frame();
+        }
+    }
+    assert_eq!(again.step_frame(), &frame[..], "the same frame gave a different screen");
+}
