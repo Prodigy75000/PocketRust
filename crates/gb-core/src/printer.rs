@@ -54,9 +54,20 @@ pub const MAX_PAYLOAD: usize = 0x280;
 /// A printed page is always this wide. The printer's head is 160 dots across.
 pub const WIDTH: usize = 160;
 
-/// Bands the printer's buffer holds before it reports itself full. Nine bands
-/// of 16 pixels is 144 lines, one Game Boy screen.
-const MAX_BANDS: usize = 9;
+/// The printer's graphics buffer.
+///
+/// 8 KiB, which the documentation gives as "a maximum bitmap area of 160*200
+/// pixels between prints". A single print is at most 20 by 18 tiles, which is
+/// 160 by 144, or 5760 bytes, so a legal print never fills this; the flag is for
+/// a game that sends more than the hardware can hold.
+///
+/// This was nine bands, reasoned from "144 lines is one Game Boy screen", and
+/// that number was wrong in the worst possible way: 5760 bytes is EXACTLY nine
+/// bands, so the Game Boy Camera, which prints a full screen, landed precisely
+/// on the invented limit and was told the buffer was full when it was two
+/// thirds empty. Pokemon Yellow prints five and seven bands and never came near
+/// it, so the harness could not see the bug.
+const BUFFER_BYTES: usize = 8 * 1024;
 
 /// Status bits, from the published protocol.
 mod status {
@@ -329,7 +340,7 @@ impl Printer {
         }
         self.buffer.extend_from_slice(&data);
 
-        if self.buffer.len() >= MAX_BANDS * MAX_PAYLOAD {
+        if self.buffer.len() >= BUFFER_BYTES {
             self.status |= status::IMAGE_FULL;
         }
         self.status |= status::UNPROCESSED;
@@ -863,6 +874,47 @@ mod tests {
         assert!(
             s.pixels.iter().all(|&v| v == 3),
             "an all-ones band prints solid"
+        );
+    }
+
+    #[test]
+    fn a_full_screen_print_does_not_report_the_buffer_full() {
+        // The Game Boy Camera prints a whole 160x144 screen, which is nine
+        // bands and 5760 bytes. The printer holds 8 KiB, so that is two thirds
+        // of it and the buffer is NOT full.
+        //
+        // This existed as a bug: the limit was nine bands, reasoned from "144
+        // lines is one screen", and a full-screen print landed exactly on it. On
+        // a real device the Camera then sat on "transferring" with a full
+        // progress bar forever. Pokemon Yellow prints five and seven bands, so
+        // no test that only drove Yellow could ever have seen it.
+        let mut p = Printer::new();
+        send(&mut p, &packet(0x01, false, &[]));
+
+        let band = vec![0xAA; MAX_PAYLOAD];
+        let mut last = 0;
+        for _ in 0..9 {
+            last = reply_of(&send(&mut p, &packet(0x04, false, &band))).1;
+        }
+        assert_eq!(
+            last & status::IMAGE_FULL,
+            0,
+            "a 160x144 print reported the buffer full; status {last:#010b}"
+        );
+        assert_eq!(
+            last & status::UNPROCESSED,
+            status::UNPROCESSED,
+            "nine bands of data should be waiting to print"
+        );
+
+        // And the flag still works for a game that really does overrun it.
+        for _ in 0..5 {
+            last = reply_of(&send(&mut p, &packet(0x04, false, &band))).1;
+        }
+        assert_eq!(
+            last & status::IMAGE_FULL,
+            status::IMAGE_FULL,
+            "fourteen bands is past 8 KiB and should report full"
         );
     }
 
