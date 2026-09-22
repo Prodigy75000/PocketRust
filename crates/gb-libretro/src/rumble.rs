@@ -62,9 +62,11 @@ struct Shared {
     available: bool,
     /// What the motor was doing last frame, so only edges are sent.
     last: bool,
-    /// Has the frontend ever accepted a state change?
+    /// Has the frontend ever accepted a state change? A property of the
+    /// DEVICE, so it outlives any one cartridge.
     accepted: bool,
-    /// Has the "it cannot actually buzz" note been handed out?
+    /// Has the "it cannot actually buzz" note been handed out? Also a property
+    /// of the device, and deliberately not reset per game: see `stop`.
     announced: bool,
 }
 
@@ -144,9 +146,16 @@ pub fn stop() {
             unsafe { f(0, RETRO_RUMBLE_WEAK, 0) };
         }
     }
+    // Only the edge. `accepted` and `announced` describe the DEVICE, which does
+    // not change when a cartridge does, so clearing them here would re-ask and
+    // re-announce on every load.
+    //
+    // That is not hypothetical. The owner's smoke tablet, an SM-X400, reports
+    // "No vibrator found" and does not carry the vibrator feature at all, so
+    // for it the answer is false permanently. Resetting per load would put
+    // "this device cannot rumble" on screen every single time Pokemon Pinball
+    // is opened, forever, which turns one useful explanation into a nag.
     s.last = false;
-    s.accepted = false;
-    s.announced = false;
 }
 
 /// Say once, and only once, that the frontend cannot actually buzz.
@@ -157,16 +166,41 @@ pub fn stop() {
 /// evidence that it does anything is a call that was taken.
 pub fn unavailable_notice() -> bool {
     let s = shared();
-    if s.announced || !s.last || s.accepted {
+    if !should_announce(s.announced, s.last, s.accepted) {
         return false;
     }
     s.announced = true;
     true
 }
 
+/// The rule, separated from the global so it can be tested.
+///
+/// Announce only when the motor has genuinely been asked to run and nothing
+/// took it, and only ever once. The "asked to run" half is what keeps a player
+/// who never reaches a rumbling moment from being told about a limitation they
+/// have not hit.
+fn should_announce(announced: bool, motor_wanted: bool, accepted: bool) -> bool {
+    !announced && motor_wanted && !accepted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_notice_waits_for_a_real_attempt_and_then_fires_once() {
+        // Nothing has asked for the motor yet: saying anything here would be
+        // telling a player about a limit they have not reached.
+        assert!(!should_announce(false, false, false));
+        // Asked, and nothing took it. This is the one case worth a message.
+        assert!(should_announce(false, true, false));
+        // Already said. Repeating it on every cartridge load turns a useful
+        // explanation into a nag, and on a device with no vibrator at all it
+        // would repeat forever.
+        assert!(!should_announce(true, true, false));
+        // The frontend can actually buzz, so there is nothing to explain.
+        assert!(!should_announce(false, true, true));
+    }
 
     #[test]
     fn the_environment_id_has_no_experimental_bit() {
