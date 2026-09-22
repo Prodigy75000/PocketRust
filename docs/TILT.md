@@ -27,6 +27,14 @@ below has since been run and they are correct as written. See "If it plays
 backwards" for the derivation, which is still worth keeping because it is what
 to re-check if a frontend ever reports differently.
 
+**The jump gesture works, and that validates the scale for free.** Jerking the
+device makes Kirby jump, confirmed on hardware. Nothing here implements a jump:
+the game is thresholding raw acceleration, so it only fires if `ACCEL_G`, the
+`$70`-per-g figure the readings are built from, is close to right. A scale
+wrong by much in either direction would give a Kirby who never jumps or who
+jumps constantly. Tilt direction alone would not have caught that, because
+direction survives any positive scale factor.
+
 **Touch controls have no fallback, deliberately.** The stick is the fallback and
 the Game Boy overlay has no stick, so on touch, tilt IS the input. Tilt on
 Android is meant to come from the device's own sensor (owner, 2026-09-22), and
