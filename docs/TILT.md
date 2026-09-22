@@ -17,7 +17,11 @@ a fallback so the cartridge is playable on a controller or a desktop frontend.
 
 **Not done, on Android.** Nothing feeds the sensor for a Game Boy game yet. See
 "A registered interface is not a running sensor" below. Until that lands, Kirby
-plays on the left analog stick, which the core falls back to on its own.
+plays on the left analog stick, which the core falls back to on its own, and the
+touch overlay has no stick, so on a phone with touch controls he does not move.
+That is deliberate: **tilt on Android is meant to come from the device's own
+sensor** (owner, 2026-09-22), and the D-pad is not an acceptable substitute
+because it is a real Game Boy input with its own jobs, the Camera's among them.
 
 **Unverified.** The sign convention of the phone's accelerometer, which is
 derived rather than measured. See "If it plays backwards" below. Everything
@@ -110,8 +114,13 @@ Android reports them. The core converts; the frontend should not.
 
 **There is a fallback and it is automatic.** With no live sensor, the core reads
 the left analog stick at one g full deflection, so the cartridge is playable on
-a controller, on a desktop frontend, or on a tablet in a stand. The core says
-which one the player got, about a second in, via `SET_MESSAGE`.
+a controller and on a desktop frontend. The core says which one the player got,
+about three seconds in, via `SET_MESSAGE`.
+
+**The stick only, never the D-pad.** The D-pad is a real Game Boy input that
+other cartridges use, so a control that silently means two things is one that
+gets stuck in the wrong one. The stick carries no such risk: the Game Boy never
+had one, so nothing else can want it.
 
 ## A registered interface is not a running sensor
 
@@ -130,13 +139,28 @@ still, which is a legitimate thing for a player to be doing. Taken at face value
 that is the worst of both outcomes: the ball never moves **and** the analog
 fallback never engages, because the sensor looked fine.
 
-So the core does not trust the registration. It reads accelerometer **Z** as
-well, purely as a liveness check: a real accelerometer measures the reaction to
-gravity, so at rest its vector has magnitude about 1g whichever way up the
-device is, and it essentially never reads all zeroes. Below `0.1g` total, the
-core treats the feed as dead and uses the stick. The flag latches once a real
-reading arrives, so a momentary genuine zero cannot drop a player onto the stick
-mid-roll.
+So the core does not trust the registration. It tests whether the reading
+**moves**.
+
+The first attempt tested magnitude instead, reasoning that an accelerometer
+measures the reaction to gravity and so reads about 1g at rest whichever way up
+it is, and never all zeroes. That is true of the hardware and useless as a test,
+because **the dead path does not feed zeroes either**: Android's bridge stores
+`(0, 0, 1)` when it unmounts, deliberately, so the next core sees a sane rest
+pose rather than the last vigorous shake. A plausible baseline, chosen for
+precisely the reason the check assumed nobody would choose one.
+
+That was caught on the tablet, not in review: the core announced "using this
+device's accelerometer" and then read a permanently level device, which is the
+exact failure the magnitude check existed to prevent. Worth remembering as the
+shape of this whole class of bug, the failure that presents as a **reasonable
+value** rather than as an error.
+
+Change survives it, because it does not care what the constant is. A real
+accelerometer in a human hand is never still; a stored baseline never moves at
+all. Threshold `0.02g` on any axis, latched once seen. It is also self-healing
+in the right direction: a genuinely motionless device misread as dead goes live
+the moment the player picks it up, which is exactly when tilt starts to matter.
 
 This means the Android side can be wired later with **no core change**: the
 first real reading switches the input over by itself.

@@ -75,23 +75,34 @@ const RETRO_SENSOR_ACCELEROMETER_Y: c_uint = 1;
 /// Read only as a liveness check, never as tilt. See `LIVE_THRESHOLD_G`.
 const RETRO_SENSOR_ACCELEROMETER_Z: c_uint = 2;
 
-/// Total |x|+|y|+|z| below this means nothing is feeding the sensor.
+/// How far the reading must MOVE before we believe a sensor is behind it.
 ///
-/// A real accelerometer reads the reaction to gravity, so at rest its vector
-/// has magnitude about 1g whatever way up the device is. It essentially never
-/// reads all zeroes: that is freefall, and only for an instant.
+/// Liveness is a question about change over time, not about magnitude, and
+/// that distinction was bought the expensive way. Registering the interface
+/// does not mean a sensor is running: our host answers the environment call
+/// `true` unconditionally so Dolphin stays on its motion path, and on Android
+/// the listener that fills those values is mounted only while a Wii game is
+/// loaded.
 ///
-/// This check exists because "the interface registered" turns out not to mean
-/// "a sensor is running". Our own host answers the environment call `true`
-/// unconditionally, by design, so that Dolphin stays on its motion path; and
-/// on Android the listener that fills those values is mounted only while a Wii
-/// game is loaded. A Game Boy cartridge therefore gets a successful
-/// registration and a feed of perfect zeroes, which reads as a player holding
-/// the device exactly level and forever still.
+/// The first attempt here tested the magnitude, on the reasoning that an
+/// accelerometer measures the reaction to gravity and so reads about 1g at
+/// rest whichever way up it is, and never all zeroes. That is true of the
+/// hardware and useless as a test, because the DEAD path does not feed zeroes
+/// either: Android's bridge stores `(0, 0, 1)` when it unmounts, deliberately,
+/// so the next core sees a sane rest pose instead of the last vigorous shake.
+/// A plausible baseline chosen for exactly the reason the check assumed no one
+/// would choose one.
 ///
-/// Without this, that case is the worst of both: the ball never moves AND the
-/// analog-stick fallback never engages, because the sensor looked fine.
-const LIVE_THRESHOLD_G: f32 = 0.1;
+/// Measured on a tablet: the core announced "using this device's
+/// accelerometer" and then read a permanently level device, which is the
+/// precise failure the magnitude check was written to prevent.
+///
+/// Change survives that, because it does not care what the constant is. A real
+/// accelerometer in a human hand is never still; a stored baseline never moves
+/// at all. It is also self-healing in the right direction: if a genuinely
+/// motionless device is misread as dead, the player picks it up and it goes
+/// live, which is exactly when tilt starts mattering.
+const LIVE_CHANGE_G: f32 = 0.02;
 
 /// The rate we ask for, in Hz. A hint: the host samples at whatever its own
 /// listener runs at and accepts any value here.
@@ -113,10 +124,11 @@ struct Shared {
     available: bool,
     /// Have we asked the frontend to turn the accelerometer on?
     running: bool,
-    /// Has the sensor ever reported a physically possible reading? Latched,
-    /// because once a real feed is proven the answer cannot change, and a
-    /// momentary genuine zero should not drop the player onto the stick
-    /// mid-roll.
+    /// The first reading seen since `start`, to compare later ones against.
+    first: Option<(f32, f32, f32)>,
+    /// Has the reading ever moved? Latched, because once a real feed is proven
+    /// the answer cannot change, and a player holding still for a moment must
+    /// not be dropped onto the fallback mid-roll.
     live: bool,
     /// Frames since `start`, until the sensor-or-stick question is settled.
     /// Stops counting once it has been answered.
@@ -139,6 +151,7 @@ static SHARED: Global = Global(UnsafeCell::new(Shared {
     },
     available: false,
     running: false,
+    first: None,
     live: false,
     settling: 0,
     announced: false,
@@ -184,6 +197,7 @@ pub fn start() {
         return;
     }
     s.running = true;
+    s.first = None;
     s.live = false;
     s.settling = 0;
     s.announced = false;
@@ -204,6 +218,7 @@ pub fn stop() {
         return;
     }
     s.running = false;
+    s.first = None;
     s.live = false;
     if let Some(f) = s.iface.set_sensor_state {
         unsafe { f(0, RETRO_SENSOR_ACCELEROMETER_DISABLE, 0) };
@@ -228,10 +243,19 @@ pub fn tilt() -> Option<(f32, f32)> {
         return None;
     }
     if !s.live {
-        if x.abs() + y.abs() + z.abs() < LIVE_THRESHOLD_G {
-            return None;
+        match s.first {
+            None => {
+                s.first = Some((x, y, z));
+                return None;
+            }
+            Some((fx, fy, fz)) => {
+                let moved = (x - fx).abs().max((y - fy).abs()).max((z - fz).abs());
+                if moved < LIVE_CHANGE_G {
+                    return None;
+                }
+                s.live = true;
+            }
         }
-        s.live = true;
     }
     Some((-x, y))
 }
@@ -254,10 +278,11 @@ pub fn settle() -> Option<bool> {
         return Some(true);
     }
     s.settling += 1;
-    // About a second. Long enough for a listener that starts with the game to
-    // deliver its first event, short enough that a player reaching for a
-    // control has not yet concluded the game is broken.
-    if s.settling < 60 {
+    // Three seconds. Longer than the old one second, because the question is
+    // now "has it moved" rather than "is it non-zero", and a player who set the
+    // device down while the game booted deserves a moment to pick it up before
+    // being told they are on the D-pad.
+    if s.settling < 180 {
         return None;
     }
     s.announced = true;

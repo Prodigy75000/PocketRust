@@ -820,10 +820,20 @@ pub extern "C" fn retro_run() {
             gb.set_button(Button::Left, pressed(RETRO_DEVICE_ID_JOYPAD_LEFT));
             gb.set_button(Button::Right, pressed(RETRO_DEVICE_ID_JOYPAD_RIGHT));
 
-            // MBC7's accelerometer. The phone's own sensor if there is one,
-            // and the left analog stick otherwise, so the cartridge is still
-            // playable on a controller, on a desktop frontend, or on a tablet
-            // sitting in a stand.
+            // MBC7's accelerometer: the device's own sensor if one is really
+            // feeding us, and the left analog stick otherwise.
+            //
+            // The stick and NOT the D-pad, on the owner's call. The D-pad is a
+            // real Game Boy input with its own jobs, the Camera's among them,
+            // and a control that silently means two things is a control that
+            // gets stuck in the wrong one. The stick carries no such conflict:
+            // the Game Boy never had one, so nothing else can want it.
+            //
+            // This does mean the fallback is unreachable from the Android touch
+            // overlay, which offers a D-pad, A and B and no stick. Accepted
+            // rather than overlooked: tilt on Android is meant to come from the
+            // device's own sensor, and the stick is here so the cartridge stays
+            // playable on a controller and on desktop.
             if gb.has_tilt() {
                 // Say which input the player actually got, once we know. The
                 // two play completely differently, and "why is tilting doing
@@ -832,7 +842,7 @@ pub extern "C" fn retro_run() {
                     tilt_notice = Some(if from_sensor {
                         "Tilt: using this device's accelerometer"
                     } else {
-                        "Tilt: no accelerometer feed, using the left stick"
+                        "Tilt: no accelerometer feed here, using the left stick"
                     });
                 }
                 let (x, y) = sensor::tilt().unwrap_or_else(|| {
