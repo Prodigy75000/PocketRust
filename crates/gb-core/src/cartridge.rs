@@ -1470,6 +1470,78 @@ impl Cartridge {
 mod tests {
     use super::*;
 
+    /// The two no-signal cards are a CROSS-REPOSITORY contract, described in
+    /// docs/CAMERA.md and referenced from TrophyHubLibretroHost's source and
+    /// TH-Android's ticket. Changing what they look like silently makes two
+    /// other repositories' comments wrong, and nothing over there can catch it.
+    ///
+    /// So this pins the properties the contract rests on rather than the exact
+    /// pixels: one card is ROUND and one is STRAIGHT-WITH-A-DIAGONAL, which is
+    /// what lets a reader tell "no camera interface" from "no frame yet" at a
+    /// glance and in a blurry photograph of a screen.
+    ///
+    /// The diagonal is load-bearing and must not be removed as a tidy-up.
+    /// Without it the no-camera card is four flat shade bars, which is a
+    /// gradient, and a gradient is close to what a legitimate but very
+    /// low-contrast capture looks like on a four-shade panel. That would trade
+    /// an ambiguity existing only during host bring-up for one a player can hit
+    /// in a dark room. (Reasoning from TH-LibretroHost, who talked me out of
+    /// removing it.)
+    #[test]
+    fn the_two_no_signal_cards_stay_tellable_apart() {
+        let cx = CAMERA_W / 2;
+        let cy = CAMERA_H / 2;
+
+        // Round: mirroring across either axis through the centre changes nothing.
+        for (x, y) in [(cx + 20, cy), (cx + 8, cy + 30), (cx + 40, cy + 10)] {
+            let v = waiting_for_light_card(x, y);
+            assert_eq!(v, waiting_for_light_card(2 * cx - x, y), "rings not symmetric in x");
+            assert_eq!(v, waiting_for_light_card(x, 2 * cy - y), "rings not symmetric in y");
+        }
+
+        // The no-camera card is not a pure function of x: something varies down
+        // a column, which is the diagonal. Flat bars would pass every other
+        // check here and fail this one, which is the point.
+        let varies_down_a_column = (0..CAMERA_H)
+            .map(|y| no_camera_card(7, y))
+            .any(|v| v != no_camera_card(7, 0));
+        assert!(
+            varies_down_a_column,
+            "the no-camera card has become flat vertical bars. That is a gradient,              and a gradient looks like a legitimate low-light capture. The diagonal              is load-bearing; see docs/CAMERA.md."
+        );
+
+        // And they are not each other.
+        let differ = (0..CAMERA_H)
+            .step_by(7)
+            .flat_map(|y| (0..CAMERA_W).step_by(7).map(move |x| (x, y)))
+            .filter(|&(x, y)| no_camera_card(x, y) != waiting_for_light_card(x, y))
+            .count();
+        assert!(differ > 40, "the two cards have converged on each other");
+    }
+
+    /// Both cards must be STATIC, which is the strongest tell of all and the one
+    /// needing no agreement about what a diagonal looks like: a real frame moves
+    /// when the lens moves, a card never does. "Does the picture respond to the
+    /// camera" separates a diagnostic from a mangled capture in one question and
+    /// survives the blurry phone photo that shape does not. (TH-LibretroHost's
+    /// observation; it is in docs/CAMERA.md.)
+    ///
+    /// Being pure functions of position is what makes that true, so a card that
+    /// grew a frame counter or any other input would quietly break it.
+    #[test]
+    fn the_cards_are_static() {
+        for (x, y) in [(3usize, 5usize), (64, 56), (127, 111)] {
+            let a = (no_camera_card(x, y), waiting_for_light_card(x, y));
+            for _ in 0..8 {
+                assert_eq!(
+                    (no_camera_card(x, y), waiting_for_light_card(x, y)),
+                    a,
+                    "a no-signal card changed between calls; it must be static,                      because 'it moves' is how a real frame is told from a card"
+                );
+            }
+        }
+    }
+
     /// A minimal MBC3 + RAM + TIMER + BATTERY cartridge (type 0x10), 32 KiB ROM,
     /// one 8 KiB RAM bank.
     fn mbc3_rtc_cart() -> Cartridge {

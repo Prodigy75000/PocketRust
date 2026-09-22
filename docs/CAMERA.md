@@ -132,6 +132,13 @@ way round and you look in the wrong half of the system.
 | A real but sheared picture | frames ARE arriving; the **pitch** is being read as pixels rather than bytes | the frame conversion, not the registration |
 | Nothing at all, app will not build | `env_camera.cpp` missing from the frontend's build | that is a link error, and it is loud |
 
+**The strongest tell is not shape, it is motion.** Both cards are STATIC; a real
+frame moves when the lens moves. "Does the picture respond to the camera"
+separates a diagnostic from a mangled capture in one question, needs no
+agreement about what a diagonal looks like, and survives the blurry photograph
+of a screen that shape does not. Ask that first. (TH-LibretroHost's
+observation.)
+
 The third row is the trap, and it is subtle enough that two of us wrote the
 comment backwards. A pitch shear produces diagonal streaks, which resemble the
 card that means "no camera interface", so the symptom points at registration
@@ -140,6 +147,14 @@ interface failed.
 
 The first row is likewise NOT what a missing frontend pump looks like. A missing
 pump leaves the interface up and the frames undelivered, which is rings.
+
+**The diagonal in the first card is load-bearing; do not tidy it away.** Without
+it that card is four flat shade bars, which is a gradient, and a gradient is
+close to what a legitimate but very low-contrast capture looks like on a
+four-shade panel. Removing it would trade an ambiguity that exists only during
+host bring-up for one a player can hit in a dark room, which is permanent,
+user-facing, and needs opposite responses again. There is a test that fails if
+it goes.
 
 **The core wants light, not pictures.** A greyscale frame, 128 by 112, and
 nothing else. Exposure, gain, edge enhancement and dithering all happen here,
