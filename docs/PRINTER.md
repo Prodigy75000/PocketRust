@@ -151,61 +151,46 @@ Unload and reset now detach the link, so the next machine gets it attached
 properly. There is a regression test, because this is the kind of state-machine
 bug that comes back.
 
-## Known bug: the Game Boy Camera retries forever
+## The busy flag has to have an EDGE
 
-**Not fixed.** The Camera prints correctly, the PNG is written, and the game
-then sits on "transferring..." with a full progress bar and re-sends the print
-command about every 45 frames, forever.
+**The reply to the print command reports NOT busy.** Busy appears from the next
+status read onward, and clears when the job finishes.
 
-Reproducible locally, which is the main thing:
+That is not a detail and it is worth stating loudly, because it cost an evening.
+A game that watches for the busy *edge*, rather than sampling the level once,
+never sees 0 to 1 if the print command's own reply already says 1. The Game Boy
+Camera does exactly that: with busy set in that first reply it polled until busy
+cleared, concluded the job had never run, and re-sent the print command about
+every 45 frames forever, sitting on "transferring..." with a full progress bar
+while the PNG had already been written correctly.
+
+Pokemon Yellow prints and walks away without watching, so it never noticed
+either way. **A harness that only drives one game only finds that game's bugs.**
+
+Six hypotheses were eliminated by measurement before this one landed, and they
+are listed here so nobody re-runs them: the buffer-full flag (a real bug, fixed,
+did not help), "unprocessed data" clearing at print time, the print finishing
+too quickly (25x longer busy scaled the retry interval and nothing else), the
+open-bus idle byte, not clearing the buffer on print, and the empty data packet
+setting no status. A seventh, answering `$80` instead of `$81` on the alive
+byte, produced *zero* prints, which is its own useful fact: the Camera really
+does check that byte.
+
+Reproduce either way with:
 
 ```sh
 cargo run --release -p gb-runner --bin gbprint --     "dumps/roms/Game Boy Camera (USA, Europe) (SGB Enhanced).gb"     --state dumps/states/camera-print.state --keys "w30,a,w60"     --frames 1500 --shot screen.png --out print
 ```
 
-The save state sits on the print screen; A prints. Count `packet print` lines:
-one is correct, seventeen is the bug.
+One `packet print` line is correct. Seventeen is the bug returning.
 
-### What is known, measured rather than assumed
+## The buffer is 8 KiB, not nine bands
 
-The conversation is `init`, nine data packets of 640 bytes, an empty data
-packet, then `print` repeating. Each print asks for the same thing: one sheet,
-margins `$13`, palette `$E4`, exposure `$40`. The Camera polls status until the
-busy bit clears, sees `$00`, and immediately re-sends.
-
-### Hypotheses ruled out by measurement
-
-- **Buffer-full being reported.** It WAS being reported wrongly and that is
-  fixed (see below), but fixing it did not stop the retry.
-- **"Unprocessed data" clearing too early.** Holding it set for the duration of
-  the job changed the status bytes and nothing else.
-- **The print finishing too fast.** Making the busy period 25 times longer
-  changed the retry INTERVAL proportionally and nothing else. The Camera always
-  retries once busy clears, so "busy cleared" is not what it is waiting for.
-- **The open-bus idle byte.** Answering `$00` while idle, as the spec literally
-  says, instead of `$FF`, made no difference. So that deviation is not implicated
-  and can stay.
-
-### The real bug found on the way, and fixed
-
-The printer's buffer limit was **nine bands**, reasoned from "144 lines is one
-Game Boy screen". The documented capacity is 8 KiB, "a maximum bitmap area of
-160*200 pixels between prints". A full-screen print is exactly nine bands, 5760
-bytes, so the Camera landed precisely on the invented limit and was told the
-buffer was full when it was two thirds empty. Pokemon Yellow prints five and
-seven bands and never came near it.
-
-That is the lesson worth keeping: **a harness that only drives one game only
-finds that game's bugs.** Yellow prints and walks away; the Camera waits for the
-printer afterwards, so it exercises the tail of the protocol that Yellow never
-touches.
-
-### Also suspected, not yet acted on
-
-The spec says command `$01` initialise "clears buffer RAM", which implies
-**print does not**. This implementation clears the buffer on print. That is
-probably wrong, but changing it while the retry bug is live would write one PNG
-per retry, so it waits until the retry is understood.
+The limit was once `MAX_BANDS = 9`, reasoned from "144 lines is one Game Boy
+screen". The documented capacity is 8 KiB, "a maximum bitmap area of 160*200
+pixels between prints". A full-screen print is exactly 5760 bytes, which is
+exactly nine bands, so the Camera landed precisely on the invented number and
+was told its buffer was full when it was two thirds empty.
 
 ## Faults
 

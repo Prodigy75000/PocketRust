@@ -135,6 +135,9 @@ pub struct Printer {
     checksum_have: u16,
     status: u8,
     printing_left: u8,
+    /// A print has been accepted but has not started yet, so the busy flag must
+    /// not appear in the reply to the print command itself. See `start_print`.
+    print_just_accepted: bool,
 
     /// Tile data gathered from data packets, waiting for a print command.
     buffer: Vec<u8>,
@@ -164,6 +167,7 @@ impl Printer {
             checksum_have: 0,
             status: 0,
             printing_left: 0,
+            print_just_accepted: false,
             buffer: Vec::new(),
             sheets: Vec::new(),
             log: Vec::new(),
@@ -277,7 +281,23 @@ impl Printer {
             }
             Phase::Status => {
                 self.phase = Phase::Magic1;
-                let s = self.status;
+                let mut s = self.status;
+                // The reply to the print command reports NOT busy, because at
+                // that instant the printer has accepted the job and not yet
+                // started it. Busy appears from the next status read onward.
+                //
+                // This is not a detail. A game that watches for the busy EDGE,
+                // rather than sampling the level once, never sees 0 -> 1 if the
+                // print command's own reply already says 1. The Game Boy Camera
+                // does exactly that: with busy set in that first reply it polled
+                // until busy cleared, concluded the job had not run, and re-sent
+                // the print command forever, sitting on "transferring..." with a
+                // full progress bar. Pokemon Yellow prints and walks away
+                // without watching, so it never noticed either way.
+                if self.print_just_accepted {
+                    s &= !status::PRINTING;
+                    self.print_just_accepted = false;
+                }
                 // The print finishes over a few polls so a game's progress bar
                 // has something to show.
                 if self.printing_left > 0 {
@@ -379,6 +399,7 @@ impl Printer {
         self.status &= !(status::UNPROCESSED | status::IMAGE_FULL);
         self.status |= status::PRINTING;
         self.printing_left = PRINTING_POLLS;
+        self.print_just_accepted = true;
     }
 }
 
@@ -947,12 +968,53 @@ mod tests {
     }
 
     #[test]
+    fn the_print_commands_own_reply_is_not_busy_yet() {
+        // A game that watches for the busy EDGE has to be able to see 0 -> 1.
+        // If the print command's own reply already says busy, that edge never
+        // happens on the wire and such a game waits forever. The Game Boy Camera
+        // is such a game: it re-sent the print command indefinitely and sat on
+        // "transferring..." until this was right.
+        let mut p = Printer::new();
+        send(&mut p, &packet(0x01, false, &[]));
+        send(&mut p, &packet(0x04, false, &vec![0xFF; 64]));
+
+        let accepted = reply_of(&send(&mut p, &packet(0x02, false, &[1, 0x13, 0xE4, 0x40])));
+        assert_eq!(
+            accepted.1 & status::PRINTING,
+            0,
+            "the print's own reply must not claim to be printing yet"
+        );
+
+        let first_poll = reply_of(&send(&mut p, &packet(0x0F, false, &[])));
+        assert_eq!(
+            first_poll.1 & status::PRINTING,
+            status::PRINTING,
+            "busy has to appear on the next poll, or there is no edge at all"
+        );
+
+        // And it still ends.
+        let mut polls = 0;
+        loop {
+            let st = reply_of(&send(&mut p, &packet(0x0F, false, &[]))).1;
+            polls += 1;
+            if st & status::PRINTING == 0 {
+                break;
+            }
+            assert!(polls < 64, "busy never cleared");
+        }
+        // The page is still produced, which is the point of all this.
+        assert_eq!(p.take_sheets().len(), 1);
+    }
+
+    #[test]
     fn printing_reports_busy_and_then_stops() {
         let mut p = Printer::new();
         send(&mut p, &packet(0x01, false, &[]));
         send(&mut p, &packet(0x04, false, &vec![0xFF; 64]));
-        let answers = send(&mut p, &packet(0x02, false, &[0x01, 0x13, 0xE4, 0x40]));
-        let (_, st) = reply_of(&answers);
+        send(&mut p, &packet(0x02, false, &[0x01, 0x13, 0xE4, 0x40]));
+        // Busy appears on the first POLL, not in the print's own reply; see
+        // the_print_commands_own_reply_is_not_busy_yet for why that matters.
+        let (_, st) = reply_of(&send(&mut p, &packet(0x0F, false, &[])));
         assert_eq!(st & status::PRINTING, status::PRINTING, "print says busy");
 
         // A game polls with $0F until it stops saying busy. This has to end.
