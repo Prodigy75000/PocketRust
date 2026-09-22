@@ -108,7 +108,7 @@ const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 /// contains.
 #[used]
 static BUILD_FEATURES: &[u8] = concat!(
-    "POCKETRUST_FEATURES:printer,camera,tilt,rumble,gamelink,colorize,sgb",
+    "POCKETRUST_FEATURES:printer,camera,tilt,rumble,gamelink,colorize",
     " build=",
     env!("POCKETRUST_BUILD_ID"),
 )
@@ -122,6 +122,9 @@ const OPT_PRINTER: &CStr = c"pocketrust_printer";
 /// its first frames and never asks again, so flipping this mid-game could not
 /// make it re-detect. The frontend's copy should say "applies on next launch"
 /// rather than imply otherwise.
+/// Deliberately NOT advertised: see `retro_load_game`. Kept so the key is
+/// recorded in one place if and when the feature is worth exposing.
+#[allow(dead_code)]
 const OPT_SGB: &CStr = c"pocketrust_sgb";
 
 /// `struct retro_message`, for putting a line on the frontend's screen.
@@ -373,10 +376,6 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
                 value: c"Game Boy Printer on the link port; on|off".as_ptr(),
             },
             retro_variable {
-                key: OPT_SGB.as_ptr(),
-                value: c"Super Game Boy mode (applies on next launch); off|on".as_ptr(),
-            },
-            retro_variable {
                 key: ptr::null(),
                 value: ptr::null(),
             },
@@ -392,6 +391,7 @@ pub extern "C" fn retro_set_environment(cb: retro_environment_t) {
 
 /// Read the colorize option from the front-end and apply it to the core.
 /// Read one core option, or `default` when the frontend has no opinion.
+#[allow(dead_code)]
 fn read_option(s: &State, key: &CStr, default: &'static str) -> String {
     let Some(env) = s.env else {
         return default.to_string();
@@ -709,12 +709,16 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     // turning this on costs 52 that render only with it off. So it is opt-in,
     // it defaults off, and the default path is byte-for-byte what shipped
     // before this option existed.
-    with_state(|s| {
-        let want_sgb = read_option(s, OPT_SGB, "off") == "on";
-        if let Some(gb) = &mut s.gb {
-            gb.set_sgb(want_sgb);
-        }
-    });
+    // No SGB option is advertised, and none is read. Both halves matter: a
+    // frontend that hid only the control would still have a stored preference
+    // on the wire, so anyone who enabled it in an earlier build would carry a
+    // broken screen into one with no way to switch it off. TH-Android caught
+    // that on their side; this is the same gate on mine.
+    //
+    // The implementation stays in gb-core behind `GameBoy::set_sgb`, which is
+    // how the runner tools still drive it. It is groundwork, not a feature:
+    // palettes alone are not what anyone wanted from SGB, they are currently
+    // wrong on Pokemon Blue, and answering the handshake costs 52 cartridges.
 
     // Only now, and only for a cartridge that actually has a sensor. A frontend
     // must never be made to raise a camera permission prompt because somebody

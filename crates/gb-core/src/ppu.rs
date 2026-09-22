@@ -532,14 +532,6 @@ impl Ppu {
     }
 
     /// Resolve a background colour index to RGB.
-    fn bg_color(&self, palette: u8, color: u8) -> Pixel {
-        if self.cgb {
-            cgb_rgb(&self.bg_pal, palette, color)
-        } else {
-            self.active_palette().bg[apply_palette(self.bgp, color) as usize]
-        }
-    }
-
     /// As `bg_color`, but honouring the SGB's per-tile palette map.
     fn bg_color_at(&self, palette: u8, color: u8, x: usize, y: usize) -> Pixel {
         if self.cgb {
