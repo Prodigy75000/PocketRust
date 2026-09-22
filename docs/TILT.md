@@ -15,17 +15,23 @@ calibration screen, reads and writes save files, and rolls in both axes.
 **Done.** The libretro side: the sensor interface, with the left analog stick as
 a fallback so the cartridge is playable on a controller or a desktop frontend.
 
-**Not done, on Android.** Nothing feeds the sensor for a Game Boy game yet. See
-"A registered interface is not a running sensor" below. Until that lands, Kirby
-plays on the left analog stick, which the core falls back to on its own, and the
-touch overlay has no stick, so on a phone with touch controls he does not move.
-That is deliberate: **tilt on Android is meant to come from the device's own
-sensor** (owner, 2026-09-22), and the D-pad is not an acceptable substitute
-because it is a real Game Boy input with its own jobs, the Camera's among them.
+**Done, on Android**, as of TrophyHubAndroid 7b802fc2 (2026-09-22). The bridge
+publishes plain device axes in g and is gated on the cartridge type byte rather
+than on the platform, so it wakes for a tilt cartridge and for nothing else.
+Confirmed on hardware the same afternoon, owner's words: "reacts perfectly to
+the tilt".
 
-**Unverified.** The sign convention of the phone's accelerometer, which is
-derived rather than measured. See "If it plays backwards" below. Everything
-else in this document was measured against the cartridge.
+**The axis signs are measured, not just derived.** They were derived first, and
+that was the one part of this with no evidence behind it; the hardware test
+below has since been run and they are correct as written. See "If it plays
+backwards" for the derivation, which is still worth keeping because it is what
+to re-check if a frontend ever reports differently.
+
+**Touch controls have no fallback, deliberately.** The stick is the fallback and
+the Game Boy overlay has no stick, so on touch, tilt IS the input. Tilt on
+Android is meant to come from the device's own sensor (owner, 2026-09-22), and
+the D-pad is not an acceptable substitute because it is a real Game Boy input
+with its own jobs: in Kirby it pans the in-game camera.
 
 ## The mapper
 
@@ -186,7 +192,11 @@ held upright.
 
 ## If it plays backwards
 
-The one part of this that is derived rather than measured. An accelerometer
+Confirmed correct on a Galaxy Tab A9+ on 2026-09-22, so this section is now a
+record of the reasoning rather than a warning. It is kept because it is what to
+re-derive against if another frontend's sensor convention ever disagrees.
+
+An accelerometer
 reports **specific force**, so at rest it reads the reaction to gravity pointing
 *up*, not gravity pointing down. Writing `x_d` and `y_d` for the device's
 rightward and up-the-screen axes:
@@ -204,13 +214,14 @@ negations:
   core x = -sensor X        core y = +sensor Y
 ```
 
-Which looks asymmetric and is not. Both signs live in `crates/gb-libretro/src/sensor.rs`
-and nowhere else, so if Kirby rolls the wrong way on a real device, that is a
-two-character fix in one file.
+Which looks asymmetric and is not. Both signs live in
+`crates/gb-libretro/src/sensor.rs` and nowhere else, so if Kirby ever rolls the
+wrong way on some other frontend, that is a two-character fix in one file.
 
 **The test, on hardware: lower the right-hand edge. Kirby must roll right.**
 That needs no agreement about what "forward" means and no reasoning about
-reaction forces.
+reaction forces, which is why it is the test to hand somebody rather than the
+derivation above.
 
 ## Testing
 
