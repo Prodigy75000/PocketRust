@@ -82,6 +82,24 @@ registers a frame callback and the **frontend** calls it, on the `retro_run`
 thread. Anyone building the Android half by analogy with the mic will build the
 wrong shape.
 
+**The host does not implement this interface yet, and that is a trap.** Checked
+2026-09-22: `grep -ri camera` over `TrophyHubLibretroHost/src` and `include`
+returns nothing, so cmd `26` falls to the default branch and is logged as
+unhandled. A core probing it today correctly concludes there is no camera.
+
+That matters because of what it will look like LATER. Once the sensor model is
+real, a missing host interface means the placeholder gradient keeps appearing,
+and the obvious diagnosis is "the sensor model is broken" when the cause is in a
+third repository. Anyone debugging a stubborn gradient should check the host
+first. (Found by TH-Android, who went and measured it rather than assuming.)
+
+The template already exists there: `GET_SENSOR_INTERFACE`, `21 | EXPERIMENTAL`
+= `$10015`, is implemented in `src/env/env_sensor.cpp` for Dolphin's Wii Remote
+motion. It accepts the command, returns a struct of callbacks, and lets the
+Kotlin side drive the values. The camera needs the same shape with the direction
+reversed: the host has to hold the core's callback pointers and the start/stop
+lifecycle rather than answer a poll.
+
 **The core wants light, not pictures.** A greyscale frame, 128 by 112, and
 nothing else. Exposure, gain, edge enhancement and dithering all happen here,
 from the registers the game writes, which is precisely what makes the in-game
