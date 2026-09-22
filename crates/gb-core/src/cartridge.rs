@@ -17,6 +17,11 @@ pub struct Header {
     /// MBC3 carts with the on-board timer chip (cart types 0x0F / 0x10) carry a
     /// real-time clock. Only these expose the RTC registers.
     pub has_rtc: bool,
+    /// MBC5 carts with a rumble motor (cart types 0x1C / 0x1D / 0x1E). On these
+    /// bit 3 of the RAM bank register drives the motor instead of the RAM chip,
+    /// so the same write means different things on two MBC5 cartridges and the
+    /// mapper cannot tell them apart without this.
+    pub has_rumble: bool,
     pub cgb_flag: u8,
     /// SGB support flag (0x146): 0x03 means the cart carries SGB commands.
     /// Parsed but currently unused: SGB detection is disabled (see `Mmu::new`),
@@ -104,6 +109,11 @@ impl Header {
         // Cart types 0x0F (MBC3+TIMER+BATTERY) and 0x10 (MBC3+TIMER+RAM+BATTERY)
         // are the only ones with the RTC crystal.
         let has_rtc = matches!(cart_type, 0x0F | 0x10);
+        // MBC5 with a motor. Worth reading off the header rather than guessing
+        // from behaviour, because on these carts bit 3 of the RAM bank register
+        // stops being an address line, so the same write means different things
+        // on two cartridges with the same mapper.
+        let has_rumble = matches!(cart_type, 0x1C | 0x1D | 0x1E);
 
         // ROM size: 32 KiB << N gives the total size, i.e. 2 << N banks of 16 KiB.
         let rom_banks = 2usize << rom[0x0148];
@@ -126,6 +136,7 @@ impl Header {
             ram_banks,
             has_battery,
             has_rtc,
+            has_rumble,
             cgb_flag: rom[0x0143],
             sgb_flag: rom[0x0146],
             title_checksum: rom[0x0134..=0x0143]
@@ -647,7 +658,13 @@ enum Mbc {
     Mbc5 {
         ram_enabled: bool,
         rom_bank: u16, // 9 bits
-        ram_bank: u8,  // 4 bits
+        ram_bank: u8,  // 4 bits, or 3 on a rumble cart
+        /// Is the motor running? An OUTPUT, not emulation state: nothing in
+        /// here reads it, and it is deliberately left out of the save state so
+        /// that adding rumble does not move a byte for every MBC5 cartridge.
+        /// A state saved mid-buzz restores with the motor off and the game
+        /// sets it again on its next bank write.
+        rumble: bool,
     },
     Huc1 {
         /// true = the 0xA000 window is the IR port; false = cartridge RAM.
@@ -1069,6 +1086,7 @@ impl Cartridge {
                 rtc: Rtc::new(),
             },
             MbcKind::Mbc5 => Mbc::Mbc5 {
+                rumble: false,
                 ram_enabled: false,
                 rom_bank: 1,
                 ram_bank: 0,
@@ -1200,6 +1218,7 @@ impl Cartridge {
 
     /// Write to the ROM region: interpreted as an MBC control write.
     pub fn write_rom(&mut self, addr: u16, val: u8) {
+        let has_rumble = self.header.has_rumble;
         match &mut self.mbc {
             Mbc::None => {}
             Mbc::Mbc7 {
@@ -1276,11 +1295,24 @@ impl Cartridge {
                 ram_enabled,
                 rom_bank,
                 ram_bank,
+                rumble,
             } => match addr {
                 0x0000..=0x1FFF => *ram_enabled = (val & 0x0F) == 0x0A,
                 0x2000..=0x2FFF => *rom_bank = (*rom_bank & 0x100) | val as u16,
                 0x3000..=0x3FFF => *rom_bank = (*rom_bank & 0x0FF) | ((val as u16 & 1) << 8),
-                0x4000..=0x5FFF => *ram_bank = val & 0x0F,
+                0x4000..=0x5FFF => {
+                    if has_rumble {
+                        // Bit 3 drives the motor instead of the RAM chip, so
+                        // it is NOT part of the bank number here. Leaving it in
+                        // would alias bank 0 onto bank 8 every time the game
+                        // buzzed, which on a 4-bank cart is a save that
+                        // scribbles on itself whenever the ball hits a bumper.
+                        *rumble = val & 0x08 != 0;
+                        *ram_bank = val & 0x07;
+                    } else {
+                        *ram_bank = val & 0x0F;
+                    }
+                }
                 _ => {}
             },
             Mbc::Huc1 {
@@ -1355,6 +1387,21 @@ impl Cartridge {
                 _ => {}
             }
         }
+    }
+
+    /// Does this cartridge have a rumble motor on it?
+    pub fn has_rumble(&self) -> bool {
+        self.header.has_rumble
+    }
+
+    /// Is the motor running right now?
+    ///
+    /// The Game Boy's motor is a single speed with no duty cycle: the game sets
+    /// a bit and the motor spins until it clears it. So this is a plain
+    /// on-or-off, and any strength curve belongs to whoever owns the actuator,
+    /// not here.
+    pub fn rumble(&self) -> bool {
+        matches!(self.mbc, Mbc::Mbc5 { rumble: true, .. })
     }
 
     /// Does this cartridge have a tilt sensor on it?
@@ -1855,6 +1902,12 @@ impl Cartridge {
                 ram_enabled,
                 rom_bank,
                 ram_bank,
+                // `rumble` is deliberately absent. It is an output to the
+                // frontend rather than machine state, so serializing it would
+                // move a byte in every MBC5 save state, including every
+                // Pokemon Yellow one anybody already has, to carry a bit
+                // nothing reads back.
+                ..
             } => {
                 c.bool(ram_enabled);
                 c.u16(rom_bank);

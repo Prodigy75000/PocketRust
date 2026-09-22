@@ -197,6 +197,23 @@ impl GameBoy {
         self.mmu.cartridge.set_camera_frame(gray)
     }
 
+    /// Does this cartridge have a rumble motor on it? (MBC5 rumble carts:
+    /// Pokemon Pinball, Perfect Dark, Star Wars Episode I Racer and about forty
+    /// others.)
+    pub fn has_rumble(&self) -> bool {
+        self.mmu.cartridge.has_rumble()
+    }
+
+    /// Is the rumble motor running right now?
+    ///
+    /// Poll once a frame and drive the actuator on the CHANGE. The Game Boy's
+    /// motor has one speed and no duty cycle: the game sets a bit and the motor
+    /// spins until it clears it, so there is nothing to interpolate and any
+    /// strength curve belongs to whoever owns the actuator.
+    pub fn rumble(&self) -> bool {
+        self.mmu.cartridge.rumble()
+    }
+
     /// Does this cartridge have a tilt sensor on it? (MBC7: Kirby Tilt 'n'
     /// Tumble, Command Master.)
     pub fn has_tilt(&self) -> bool {
