@@ -14,8 +14,9 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Audio (APU) | ✅ all four channels (2 pulse, wave, noise), stereo; Blargg `dmg_sound` tests pass |
 | Timer | ✅ shared 16-bit divider model (DIV / TIMA / TMA / TAC) |
 | Interrupts | ✅ VBlank, STAT, Timer, Serial, Joypad |
-| Cartridges | ✅ no-MBC, MBC1, MBC2, MBC3 (+ RTC), MBC5, HuC1, HuC3 (+ RTC); battery-backed save RAM |
-| Game Boy Camera | 🚧 mapper done: the cartridge boots, the viewfinder is live and captures reach the album (`docs/CAMERA.md`). The M64282FP sensor model is not written yet, so what it sees is a placeholder pattern |
+| Cartridges | ✅ no-MBC, MBC1, MBC2, MBC3 (+ RTC), MBC5, MBC7, HuC1, HuC3 (+ RTC); battery-backed save RAM |
+| Game Boy Camera | ✅ mapper, M64282FP sensor model and the libretro camera interface (`docs/CAMERA.md`). Point it at a lens and the cartridge develops a real photograph, with the in-game brightness and contrast sliders doing real work. Edge enhancement and analogue gain are not modelled, so photos are soft but correct |
+| Tilt (MBC7) | ✅ two-axis accelerometer and 93LC56 EEPROM save (`docs/TILT.md`). Kirby Tilt 'n' Tumble calibrates, saves and rolls; uses the device accelerometer where there is one and the left analog stick where there is not |
 | MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm` |
 | Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |

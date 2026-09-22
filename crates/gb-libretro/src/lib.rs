@@ -8,6 +8,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod camera;
+mod sensor;
 mod netpacket;
 
 use gb_core::{Button, Colorize, GameBoy, PrinterHandle, Spool, SCREEN_H, SCREEN_W};
@@ -93,7 +94,7 @@ const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 /// `library_version` is deliberately NOT used for this. The app reads that field
 /// and it should keep meaning the core's version, not its feature set.
 #[used]
-static BUILD_FEATURES: &[u8] = b"POCKETRUST_FEATURES:printer,camera,gamelink,colorize";
+static BUILD_FEATURES: &[u8] = b"POCKETRUST_FEATURES:printer,camera,tilt,gamelink,colorize";
 
 /// Core-option key for the DMG colorization toggle (Trophy Hub drives this).
 const OPT_COLORIZE: &CStr = c"pocketrust_colorize";
@@ -121,6 +122,12 @@ enum LinkDevice {
 
 // Device + button ids.
 const RETRO_DEVICE_JOYPAD: u32 = 1;
+const RETRO_DEVICE_ANALOG: u32 = 5;
+const RETRO_DEVICE_INDEX_ANALOG_LEFT: u32 = 0;
+const RETRO_DEVICE_ID_ANALOG_X: u32 = 0;
+/// Analog Y is positive DOWNWARD in libretro, which happens to match the
+/// core's screen coordinates, so this one needs no flip.
+const RETRO_DEVICE_ID_ANALOG_Y: u32 = 1;
 const RETRO_DEVICE_ID_JOYPAD_B: u32 = 0;
 const RETRO_DEVICE_ID_JOYPAD_SELECT: u32 = 2;
 const RETRO_DEVICE_ID_JOYPAD_START: u32 = 3;
@@ -248,6 +255,9 @@ pub extern "C" fn retro_init() {
     if camera::register(env) {
         log_camera_state();
     }
+    // Same deal for the accelerometer MBC7 carries, and for the same reason:
+    // registered once here, switched on only for a cartridge that has one.
+    sensor::register(env);
 }
 
 /// Tell the core whether a camera exists, so it can pick the right diagnostic
@@ -638,6 +648,25 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     if wants_camera {
         camera::start();
     }
+    // Likewise the accelerometer: waking a phone's sensors for a game that
+    // cannot read them is pure battery drain.
+    let wants_tilt = with_state(|s| s.gb.as_ref().is_some_and(|gb| gb.has_tilt()));
+    if wants_tilt {
+        sensor::start();
+        // Say which input the player is about to get. The two play completely
+        // differently, and "why is tilting doing nothing" has one answer if
+        // there is no accelerometer and a different one if there is.
+        with_state(|s| {
+            notify(
+                s,
+                if sensor::available() {
+                    "Tilt sensor: using this device's accelerometer"
+                } else {
+                    "Tilt sensor: no accelerometer here, using the left stick"
+                },
+            )
+        });
+    }
     with_state(|s| {
         if let Some(gb) = &mut s.gb {
             gb.set_camera_available(camera::available());
@@ -711,6 +740,7 @@ pub extern "C" fn retro_unload_game() {
     // Put the lens away. Leaving a camera running for a game that is no longer
     // loaded is the kind of bug a user is right to be angry about.
     camera::stop();
+    sensor::stop();
     with_state(|s| {
         // Anything the spool is holding for a continuation that will now never
         // come. Writing it late beats losing it.
@@ -799,6 +829,29 @@ pub extern "C" fn retro_run() {
             gb.set_button(Button::Down, pressed(RETRO_DEVICE_ID_JOYPAD_DOWN));
             gb.set_button(Button::Left, pressed(RETRO_DEVICE_ID_JOYPAD_LEFT));
             gb.set_button(Button::Right, pressed(RETRO_DEVICE_ID_JOYPAD_RIGHT));
+
+            // MBC7's accelerometer. The phone's own sensor if there is one,
+            // and the left analog stick otherwise, so the cartridge is still
+            // playable on a controller, on a desktop frontend, or on a tablet
+            // sitting in a stand.
+            if gb.has_tilt() {
+                let (x, y) = sensor::tilt().unwrap_or_else(|| {
+                    let axis = |id: u32| {
+                        // Analog axes are i16 full scale. One g at full
+                        // deflection: the sensor's own range is about +/- 1.8g
+                        // but a stick held hard over should mean "on its side",
+                        // not "past anything physical".
+                        f32::from(unsafe {
+                            input(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, id)
+                        }) / 32767.0
+                    };
+                    (
+                        axis(RETRO_DEVICE_ID_ANALOG_X),
+                        axis(RETRO_DEVICE_ID_ANALOG_Y),
+                    )
+                });
+                gb.set_tilt(x, y);
+            }
         }
 
         // Run one frame; the core already produces XRGB8888 pixels.
