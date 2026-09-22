@@ -293,6 +293,11 @@ impl Mmu {
                 }
                 // The cartridge's own screen mask, now that it is honoured.
                 self.ppu.set_sgb_mask(self.sgb.mask());
+                // And which of the four palettes each tile uses.
+                if let Some(attr) = self.sgb.take_attr() {
+                    self.ppu.set_sgb_attr(attr);
+                }
+                self.ppu.set_sgb_palettes(self.sgb.palettes());
             }
             0xFF01 => self.serial.write_data(val),
             0xFF02 => self.serial.write_control(val),

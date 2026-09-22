@@ -11,6 +11,11 @@
 //! an SGB palette can display it. ATTR_* (per-region palette) and PAL_TRN (VRAM
 //! palette tables) come later; for now the last-set SGB palette 0 is applied.
 
+/// The Game Boy screen in 8x8 tiles: 20 across, 18 down.
+pub const ATTR_W: usize = 20;
+pub const ATTR_H: usize = 18;
+const ATTR_TILES: usize = ATTR_W * ATTR_H;
+
 /// Expand a 15-bit BGR555 SGB color (little-endian in the packet) to 0x00RRGGBB.
 fn bgr555(lo: u8, hi: u8) -> u32 {
     let v = (lo as u16) | ((hi as u16) << 8);
@@ -76,6 +81,15 @@ pub struct Sgb {
     sys_palettes: Box<[[u32; 4]; 512]>,
     /// MASK_EN: 0 none, 1 freeze the last frame, 2 black, 3 colour 0.
     mask: u8,
+    /// Which of the four palettes each 8x8 tile of the screen uses, 20 by 18.
+    ///
+    /// The SGB does not colour a Game Boy screen with one palette; it colours
+    /// it with four, chosen per tile by the ATTR_ commands. Applying palette 0
+    /// everywhere is what made Pokemon Blue come up red: Blue's four palettes
+    /// are three reds and a blue, and the blue is palette 3.
+    attr: [u8; ATTR_TILES],
+    /// Has the attribute map changed since the PPU last took it?
+    attr_dirty: bool,
 
     /// Debug: (command code, total data bytes) of each completed command.
     pub log: Vec<(u8, usize)>,
@@ -100,6 +114,8 @@ impl Sgb {
             palette_dirty: false,
             supported: true,
             transfer_pending: None,
+            attr: [0; ATTR_TILES],
+            attr_dirty: false,
             sys_palettes: Box::new([[0; 4]; 512]),
             mask: 0,
             log: Vec::new(),
@@ -116,6 +132,70 @@ impl Sgb {
     /// 3 colour 0.
     pub fn mask(&self) -> u8 {
         self.mask
+    }
+
+    /// The per-tile palette map, if it has changed since the last call.
+    pub fn take_attr(&mut self) -> Option<[u8; ATTR_TILES]> {
+        if !self.attr_dirty {
+            return None;
+        }
+        self.attr_dirty = false;
+        Some(self.attr)
+    }
+
+    /// All four visible palettes, for the PPU to index with the map.
+    pub fn palettes(&self) -> &[[u32; 4]; 4] {
+        &self.palettes
+    }
+
+    /// Paint one rectangle's worth of attributes.
+    ///
+    /// `ctrl` bit 0 changes the inside, bit 1 the surrounding line, bit 2 the
+    /// outside. The spec's exception matters and is easy to miss: "When
+    /// changing only the Inside or Outside, then the Surrounding line becomes
+    /// automatically changed to same color."
+    fn attr_block(&mut self, ctrl: u8, pals: u8, x1: u8, y1: u8, x2: u8, y2: u8) {
+        let (inside, line, outside) = (ctrl & 1 != 0, ctrl & 2 != 0, ctrl & 4 != 0);
+        let p_in = pals & 0x03;
+        let p_line = (pals >> 2) & 0x03;
+        let p_out = (pals >> 4) & 0x03;
+        // The exception above, both ways round.
+        let (line, p_line) = if line {
+            (true, p_line)
+        } else if inside && !outside {
+            (true, p_in)
+        } else if outside && !inside {
+            (true, p_out)
+        } else {
+            (false, p_line)
+        };
+        let (x1, x2) = (x1.min(x2) as usize, x2.max(x1) as usize);
+        let (y1, y2) = (y1.min(y2) as usize, y2.max(y1) as usize);
+        for ty in 0..ATTR_H {
+            for tx in 0..ATTR_W {
+                let on_edge = (tx == x1 || tx == x2) && (y1..=y2).contains(&ty)
+                    || (ty == y1 || ty == y2) && (x1..=x2).contains(&tx);
+                let within = (x1..=x2).contains(&tx) && (y1..=y2).contains(&ty);
+                let pal = if on_edge {
+                    if !line {
+                        continue;
+                    }
+                    p_line
+                } else if within {
+                    if !inside {
+                        continue;
+                    }
+                    p_in
+                } else {
+                    if !outside {
+                        continue;
+                    }
+                    p_out
+                };
+                self.attr[ty * ATTR_W + tx] = pal;
+            }
+        }
+        self.attr_dirty = true;
     }
 
     /// Consume the 4 KiB a `_TRN` command was waiting for.
@@ -276,6 +356,21 @@ impl Sgb {
                     _ => 1,
                 };
                 self.player_index = 0;
+            }
+            // ATTR_BLK: colour attributes for one or more rectangles. Data
+            // sets are six bytes each and run on across packets.
+            0x04 => {
+                let sets = (self.data[1] as usize).min(0x12);
+                for i in 0..sets {
+                    let o = 2 + i * 6;
+                    if o + 5 >= self.data.len() {
+                        break;
+                    }
+                    let d = &self.data;
+                    let (ctrl, pals) = (d[o] & 0x07, d[o + 1]);
+                    let (x1, y1, x2, y2) = (d[o + 2], d[o + 3], d[o + 4], d[o + 5]);
+                    self.attr_block(ctrl, pals, x1, y1, x2, y2);
+                }
             }
             // PAL_SET: copy four of PAL_TRN's 512 system palettes into the
             // visible ones. Before the transfer could be read this had to give

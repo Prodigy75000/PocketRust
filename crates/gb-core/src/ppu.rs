@@ -62,6 +62,13 @@ pub struct Ppu {
     /// takes precedence over `dmg_palette`, so the colorize option can never
     /// clobber the game's own SGB colors regardless of call order.
     sgb_palette: Option<DmgPalette>,
+    /// The other three SGB palettes, and which tile uses which.
+    ///
+    /// `sgb_palette` above is palette 0 and stays the fallback, so a cartridge
+    /// that never sends an ATTR_ command behaves exactly as before. Derived
+    /// from SGB state, so neither of these is in the save state.
+    sgb_palettes: [DmgPalette; 4],
+    sgb_attr: [u8; crate::sgb::ATTR_W * crate::sgb::ATTR_H],
     /// Frames left to blank the display while an SGB VRAM transfer is in flight
     /// (CHR/PCT/PAL/ATTR_TRN show their data on-screen as garbage; real SGB and
     /// Gambatte hide it). Counts down per frame.
@@ -138,6 +145,8 @@ impl Ppu {
             obj_pal_autoinc: false,
             dmg_palette: DmgPalette::green(),
             sgb_palette: None,
+            sgb_palettes: [DmgPalette::green(); 4],
+            sgb_attr: [0; crate::sgb::ATTR_W * crate::sgb::ATTR_H],
             sgb_mask: 0,
             sgb_frozen: None,
             frame_index: Box::new([0; SCREEN_W * SCREEN_H]),
@@ -382,7 +391,8 @@ impl Ppu {
             self.bg_index[x as usize] = color;
             self.frame_index[fb_base + x as usize] = color;
             self.bg_priority[x as usize] = attr & 0x80 != 0;
-            self.framebuffer[fb_base + x as usize] = self.bg_color(pal, color);
+            self.framebuffer[fb_base + x as usize] =
+                self.bg_color_at(pal, color, x as usize, self.ly as usize);
         }
     }
 
@@ -406,7 +416,8 @@ impl Ppu {
             self.bg_index[x as usize] = color;
             self.frame_index[fb_base + x as usize] = color;
             self.bg_priority[x as usize] = attr & 0x80 != 0;
-            self.framebuffer[fb_base + x as usize] = self.bg_color(pal, color);
+            self.framebuffer[fb_base + x as usize] =
+                self.bg_color_at(pal, color, x as usize, self.ly as usize);
             drew_any = true;
         }
         if drew_any {
@@ -529,6 +540,15 @@ impl Ppu {
         }
     }
 
+    /// As `bg_color`, but honouring the SGB's per-tile palette map.
+    fn bg_color_at(&self, palette: u8, color: u8, x: usize, y: usize) -> Pixel {
+        if self.cgb {
+            cgb_rgb(&self.bg_pal, palette, color)
+        } else {
+            self.sgb_tile_palette(x, y).bg[apply_palette(self.bgp, color) as usize]
+        }
+    }
+
     /// Resolve a sprite colour index to RGB using the sprite's OAM flags.
     fn obj_color(&self, flags: u8, color: u8) -> Pixel {
         if self.cgb {
@@ -551,6 +571,32 @@ impl Ppu {
     /// colorization (used when a cart's SGB palette path is unsupported).
     pub fn set_sgb_palette(&mut self, palette: Option<DmgPalette>) {
         self.sgb_palette = palette;
+    }
+
+    /// All four SGB palettes, as raw colours.
+    pub fn set_sgb_palettes(&mut self, pals: &[[u32; 4]; 4]) {
+        for (dst, src) in self.sgb_palettes.iter_mut().zip(pals.iter()) {
+            *dst = DmgPalette::mono_pub(*src);
+        }
+    }
+
+    /// Which palette each 8x8 tile of the screen uses.
+    pub fn set_sgb_attr(&mut self, attr: [u8; crate::sgb::ATTR_W * crate::sgb::ATTR_H]) {
+        self.sgb_attr = attr;
+    }
+
+    /// The palette for the tile containing screen pixel (x, y).
+    ///
+    /// Only consulted when an SGB palette is actually in force: without one,
+    /// the attribute map is meaningless and the ordinary DMG path applies.
+    fn sgb_tile_palette(&self, x: usize, y: usize) -> &DmgPalette {
+        if self.sgb_palette.is_none() {
+            return &self.dmg_palette;
+        }
+        let tx = (x / 8).min(crate::sgb::ATTR_W - 1);
+        let ty = (y / 8).min(crate::sgb::ATTR_H - 1);
+        let idx = self.sgb_attr[ty * crate::sgb::ATTR_W + tx] as usize;
+        &self.sgb_palettes[idx.min(3)]
     }
 
     /// A `_TRN` command arrived: read the transfer off the NEXT frame.

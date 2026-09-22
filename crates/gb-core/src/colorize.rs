@@ -42,6 +42,12 @@ pub struct DmgPalette {
 }
 
 impl DmgPalette {
+    /// Same four colours for background and both sprite palettes, public for
+    /// the SGB's four-palette path.
+    pub const fn mono_pub(shades: [u32; 4]) -> DmgPalette {
+        DmgPalette::mono(shades)
+    }
+
     /// Same four colours for background and both sprite palettes.
     const fn mono(shades: [u32; 4]) -> DmgPalette {
         DmgPalette {

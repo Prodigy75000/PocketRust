@@ -31,6 +31,10 @@ fn main() {
 
     let rom = std::fs::read(&rom_path).expect("failed to read ROM");
     let mut gb = GameBoy::new(rom);
+    // SGB=1 answers the Super Game Boy handshake, for shooting SGB palettes.
+    if std::env::var_os("SGB").is_some() {
+        gb.set_sgb(true);
+    }
     match std::env::var("GBCOLOR").as_deref() {
         Ok("auto") => gb.set_colorization(gb_core::Colorize::Auto),
         Ok("grayscale") => gb.set_colorization(gb_core::Colorize::Grayscale),

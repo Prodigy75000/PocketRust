@@ -11,9 +11,10 @@ fn main() {
 
     // A PC histogram over one frame at the end: a stuck game spends all of it
     // in a handful of addresses, and those addresses name the wait.
-    for f in 0..900u32 {
+    let total: u32 = std::env::var("FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+    for f in 0..total {
         gb.step_frame();
-        if f % 150 == 149 {
+        if f + 1 == total {
             let shades: HashSet<u32> = gb.framebuffer().iter().map(|p| p & 0xFF_FFFF).collect();
             let (cmds, active, pals) = gb.sgb_debug();
             let mut seen: Vec<String> = cmds
