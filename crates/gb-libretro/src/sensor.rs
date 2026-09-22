@@ -97,12 +97,26 @@ const RETRO_SENSOR_ACCELEROMETER_Z: c_uint = 2;
 /// accelerometer" and then read a permanently level device, which is the
 /// precise failure the magnitude check was written to prevent.
 ///
-/// Change survives that, because it does not care what the constant is. A real
-/// accelerometer in a human hand is never still; a stored baseline never moves
-/// at all. It is also self-healing in the right direction: if a genuinely
-/// motionless device is misread as dead, the player picks it up and it goes
-/// live, which is exactly when tilt starts mattering.
-const LIVE_CHANGE_G: f32 = 0.02;
+/// Change survives that, because it does not care what the constant is. A stored
+/// baseline never moves at all, so its movement is exactly zero; a real MEMS
+/// part always jitters, even bolted to a desk.
+///
+/// The threshold is set from a measurement rather than from taste, because the
+/// first guess at it was 0.02g and that was wrong in the direction that matters.
+/// A Galaxy Tab A9+ (LSM6DSVTR) lying perfectly still on a desk, with the bridge
+/// confirmed publishing, peaks at **0.00293 g** of movement over three seconds.
+/// So 0.02 reported a live sensor as dead: put the device down while the game
+/// loads and you were told to use a control you do not have.
+///
+/// 0.0005 sits well under that and still infinitely above an exact constant.
+/// Erring low is the safe direction here: being too eager costs nothing, since
+/// a dead feed cannot move at all, while being too strict silently strands a
+/// player who is holding the device carefully.
+///
+/// Nothing latches "dead", either. `tilt` keeps watching, so a device that was
+/// genuinely motionless goes live the moment somebody picks it up, which is
+/// exactly when tilt starts mattering.
+const LIVE_CHANGE_G: f32 = 0.0005;
 
 /// The rate we ask for, in Hz. A hint: the host samples at whatever its own
 /// listener runs at and accepts any value here.
