@@ -12,10 +12,20 @@ the cartridge bus. It shares nothing with the printer's code path.
 **Done.** The mapper. The cartridge boots, the menus work, the minigames run,
 the viewfinder is live, captures reach the album and the counter decrements.
 
-**Not done.** The M64282FP sensor model. Captures currently develop a
-deliberately synthetic diagonal gradient, which is what the viewfinder above is
-showing. It is obviously fake on purpose: nobody should mistake it for a working
-camera.
+**Done.** The first half of the sensor model: exposure and dithering. Point the
+core at a greyscale frame and the cartridge develops a real photograph.
+
+![A photograph through the sensor](camera-photo.png)
+![The same scene with contrast wound up](camera-contrast.png)
+
+Those two are the same scene at two settings of the in-game CONTRAST slider, and
+nothing in the core interprets that slider. The game recomputes its dither matrix
+when you move it and the core simply honours the matrix, so the control works
+because it is really doing what it says.
+
+**Not done.** The edge-enhancement kernel (`$A001`, `$A004`), the analogue gain
+and zero-point calibration (`$A005`), and inversion. Those sharpen and bias;
+without them a photograph is soft but correct.
 
 ## The mapper
 

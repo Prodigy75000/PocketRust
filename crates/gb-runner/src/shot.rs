@@ -24,6 +24,9 @@ fn main() {
     let frames: u32 = args.next().map(|s| s.parse().unwrap()).unwrap_or(600);
     let out = args.next().unwrap_or_else(|| "shot.png".into());
     let keys = args.next().unwrap_or_default();
+    // GBCAMERA=<file.png> points the Game Boy Camera's sensor at an image, so
+    // the sensor model can be developed against a file instead of a phone.
+    let camera = std::env::var("GBCAMERA").ok();
 
     let rom = std::fs::read(&rom_path).expect("failed to read ROM");
     let mut gb = GameBoy::new(rom);
@@ -33,6 +36,15 @@ fn main() {
         _ => {}
     }
     println!("Loaded '{}', running {frames} frames...", gb.title());
+    if let Some(path) = &camera {
+        let frame = load_grayscale(path);
+        assert!(
+            gb.set_camera_frame(&frame),
+            "this cartridge has no camera, or the frame is the wrong size"
+        );
+        println!("Camera: {path}");
+    }
+
     if !keys.is_empty() {
         play(&mut gb, &keys);
     }
@@ -142,4 +154,33 @@ fn play(gb: &mut GameBoy, script: &str) {
             }
         }
     }
+}
+
+/// Load any PNG and squash it to the sensor's 128x112 greyscale.
+///
+/// Nearest-neighbour and a flat luminance average: this is a development hook,
+/// not the real capture path, and a better resampler here would only hide how
+/// the sensor model behaves on hard edges.
+fn load_grayscale(path: &str) -> Vec<u8> {
+    let decoder = png::Decoder::new(File::open(path).expect("open camera image"));
+    let mut reader = decoder.read_info().expect("png header");
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).expect("png data");
+    let (sw, sh) = (info.width as usize, info.height as usize);
+    let ch = info.color_type.samples();
+
+    let mut out = vec![0u8; gb_core::CAMERA_W * gb_core::CAMERA_H];
+    for y in 0..gb_core::CAMERA_H {
+        for x in 0..gb_core::CAMERA_W {
+            let sx = x * sw / gb_core::CAMERA_W;
+            let sy = y * sh / gb_core::CAMERA_H;
+            let at = (sy * sw + sx) * ch;
+            let v = match ch {
+                1 | 2 => buf[at] as u32,
+                _ => (buf[at] as u32 + buf[at + 1] as u32 + buf[at + 2] as u32) / 3,
+            };
+            out[y * gb_core::CAMERA_W + x] = v as u8;
+        }
+    }
+    out
 }

@@ -176,6 +176,10 @@ struct Cam {
     /// Wall-clock T-cycles left of an exposure. A capture that never finished
     /// would leave a game spinning on the busy bit forever.
     busy: i32,
+    /// What the lens is pointed at: `CAMERA_W * CAMERA_H` greyscale bytes, 0 is
+    /// black. `None` means nothing is feeding us light, and captures develop a
+    /// self-describing test card instead. See `camera_develop`.
+    frame: Option<Vec<u8>>,
 }
 
 /// How long a capture is reported as busy.
@@ -191,8 +195,29 @@ const CAMERA_IMAGE_OFFSET: usize = 0x0100;
 
 /// The sensor is 128 by 128, but the controller throws away the first eight rows
 /// and the last eight, so what reaches the cartridge is 128 by 112.
-const CAMERA_W: usize = 128;
-const CAMERA_H: usize = 112;
+pub const CAMERA_W: usize = 128;
+pub const CAMERA_H: usize = 112;
+
+/// What the sensor sees when nothing is feeding it light.
+///
+/// This is a **diagnostic**, not a placeholder, and the difference matters. A
+/// frontend that has not implemented the camera interface leaves the core with
+/// no frames, and that failure looks exactly like a broken sensor model: the
+/// picture is wrong and the cause is in somebody else's repository. So the
+/// no-signal image is deliberately unmistakable rather than plausible.
+///
+/// Four vertical bars stepping through the four shades, cut by a diagonal.
+/// Nothing a lens could produce, so nobody mistakes it for a photograph, and it
+/// still exercises every shade and the whole dither matrix.
+fn test_card(x: usize, y: usize) -> u8 {
+    let bar = (x * 4 / CAMERA_W).min(3);
+    let level = [30u8, 100, 170, 240][bar];
+    if (x + y) % 32 < 3 {
+        255 - level
+    } else {
+        level
+    }
+}
 
 impl Cam {
     fn new() -> Cam {
@@ -200,6 +225,7 @@ impl Cam {
             trigger: 0,
             regs: [0; 0x35],
             busy: 0,
+            frame: None,
         }
     }
 
@@ -236,6 +262,33 @@ impl Cam {
             self.regs[i - 1] = val;
         }
         false
+    }
+
+    /// The 16-bit exposure time from $A002 (high) and $A003 (low).
+    ///
+    /// The game drives this constantly: its own auto-exposure loop hunts for a
+    /// level and the BRIGHTNESS slider biases the hunt. Measured on the real
+    /// cartridge, brightness at maximum pins it to $FFFF.
+    fn exposure(&self) -> u16 {
+        u16::from_be_bytes([self.regs[1], self.regs[2]])
+    }
+
+    /// The three dither thresholds for a pixel, ascending.
+    ///
+    /// $A006-$A035 is a 4 by 4 matrix with three bytes per element, so a pixel's
+    /// thresholds come from its position modulo four. The three are ascending and
+    /// **their spread is the contrast**: measured on the real cartridge a neutral
+    /// setting gives $89 $92 $A2 for a cell, and winding contrast up gives
+    /// $84 $96 $CA for the same one. The game recomputes the whole matrix when
+    /// either slider moves, which is why honouring this one table makes both
+    /// sliders do something real without interpreting either of them.
+    fn thresholds(&self, x: usize, y: usize) -> (u8, u8, u8) {
+        let cell = (y & 3) * 4 + (x & 3);
+        let at = 5 + cell * 3; // regs[0] is $A001, so $A006 is regs[5]
+        match (self.regs.get(at), self.regs.get(at + 1), self.regs.get(at + 2)) {
+            (Some(&a), Some(&b), Some(&c)) => (a, b, c),
+            _ => (0x55, 0x80, 0xAA),
+        }
     }
 
     fn tick(&mut self, cycles: u32) {
@@ -896,23 +949,70 @@ impl Cartridge {
     /// working camera, but which exercises the whole path from trigger to
     /// tiles. The real thing takes a greyscale frame and runs the exposure,
     /// edge enhancement and dither the registers ask for.
+    /// Turn what the sensor sees into the 2bpp tiles the cartridge expects.
+    ///
+    /// Short, and every step is driven by a register the game wrote, which is the
+    /// whole point: the in-game brightness and contrast sliders work because they
+    /// really are changing the exposure and the dither matrix, not because
+    /// anything here interprets them.
+    ///
+    /// 1. take the frame, or the test card if nothing is feeding us light;
+    /// 2. scale it by the exposure time;
+    /// 3. dither to four shades against the game's own matrix;
+    /// 4. pack into tiles at $0100 of the album.
+    ///
+    /// NOT modelled yet: the edge-enhancement kernel ($A001 and $A004), the
+    /// analogue gain and zero-point calibration ($A005), and inversion. Those
+    /// sharpen and bias; without them a photograph is soft but correct.
     fn camera_develop(&mut self) {
+        let Mbc::Camera { cam, .. } = &self.mbc else {
+            return;
+        };
+
+        // Exposure as a gain. The reference is the exposure at which the sensor
+        // neither amplifies nor attenuates. It is a tuning constant rather than a
+        // documented one, so it lives here where there is one place to change it
+        // when photographs come out flat.
+        const NOMINAL_EXPOSURE: u32 = 0x3000;
+        let gain = cam.exposure().max(1) as u32;
+
+        let mut shades = vec![0u8; CAMERA_W * CAMERA_H];
+        for y in 0..CAMERA_H {
+            for x in 0..CAMERA_W {
+                let raw = match &cam.frame {
+                    Some(f) => f[y * CAMERA_W + x],
+                    None => test_card(x, y),
+                } as u32;
+                let lit = (raw * gain / NOMINAL_EXPOSURE).min(255) as u8;
+
+                // More light means less ink, so this runs the opposite way round
+                // from the ascending thresholds.
+                let (t0, t1, t2) = cam.thresholds(x, y);
+                shades[y * CAMERA_W + x] = if lit < t0 {
+                    3
+                } else if lit < t1 {
+                    2
+                } else if lit < t2 {
+                    1
+                } else {
+                    0
+                };
+            }
+        }
+
+        // Pack into 8x8 tiles, the same 2bpp layout the PPU reads.
         let tiles_across = CAMERA_W / 8;
-        let tiles_down = CAMERA_H / 8;
-        for ty in 0..tiles_down {
+        for ty in 0..CAMERA_H / 8 {
             for tx in 0..tiles_across {
                 let tile = ty * tiles_across + tx;
                 for row in 0..8 {
-                    let y = ty * 8 + row;
                     let mut lo = 0u8;
                     let mut hi = 0u8;
                     for col in 0..8 {
-                        let x = tx * 8 + col;
-                        // A diagonal ramp through the four shades.
-                        let shade = (((x + y) / 16) % 4) as u8;
+                        let v = shades[(ty * 8 + row) * CAMERA_W + tx * 8 + col];
                         let bit = 7 - col;
-                        lo |= (shade & 1) << bit;
-                        hi |= ((shade >> 1) & 1) << bit;
+                        lo |= (v & 1) << bit;
+                        hi |= ((v >> 1) & 1) << bit;
                     }
                     let at = CAMERA_IMAGE_OFFSET + tile * 16 + row * 2;
                     if at + 1 < self.ram.len() {
@@ -922,6 +1022,34 @@ impl Cartridge {
                 }
             }
         }
+    }
+
+    /// Point the Game Boy Camera at something.
+    ///
+    /// `gray` is `CAMERA_W * CAMERA_H` bytes, one per pixel, 0 black. It must be
+    /// UNMIRRORED and in sensor orientation: a frontend that mirrors its preview,
+    /// as phone front cameras conventionally do, must hand over the unmirrored
+    /// frame or every photograph with text in it develops backwards, and it
+    /// develops backwards in a PRINT, which is the artifact people keep.
+    ///
+    /// Returns false if this cartridge has no camera, or the frame is the wrong
+    /// size.
+    pub fn set_camera_frame(&mut self, gray: &[u8]) -> bool {
+        if gray.len() != CAMERA_W * CAMERA_H {
+            return false;
+        }
+        match &mut self.mbc {
+            Mbc::Camera { cam, .. } => {
+                cam.frame = Some(gray.to_vec());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this cartridge has an image sensor on it at all.
+    pub fn has_camera(&self) -> bool {
+        matches!(self.mbc, Mbc::Camera { .. })
     }
 
     /// Whether cartridge RAM is currently readable/writable.

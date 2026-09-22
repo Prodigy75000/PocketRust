@@ -24,7 +24,7 @@ mod sgb;
 mod timer;
 
 pub use link::{packet_len, LinkProto, PROTOCOL_VERSION, TAG_CLOCK, TAG_OUTPUT, TAG_REPLY};
-pub use cartridge::mapper_is_supported;
+pub use cartridge::{mapper_is_supported, CAMERA_H, CAMERA_W};
 pub use printer::{packet as printer_packet, stitch, Printer, PrinterHandle, Sheet, Spool};
 pub use serial::{local_pair, LinkCable, LocalLink};
 
@@ -164,6 +164,28 @@ impl GameBoy {
 
     pub fn has_battery(&self) -> bool {
         self.mmu.cartridge.has_battery()
+    }
+
+    /// Does this cartridge have an image sensor on it?
+    pub fn has_camera(&self) -> bool {
+        self.mmu.cartridge.has_camera()
+    }
+
+    /// Point the Game Boy Camera at something.
+    ///
+    /// `gray` is `CAMERA_W * CAMERA_H` bytes, one per pixel, 0 black,
+    /// **unmirrored and in sensor orientation**. A frontend that mirrors its
+    /// preview, as phone front cameras conventionally do, must still hand over
+    /// the unmirrored frame: otherwise text develops backwards, including in
+    /// prints, which are the artifact people keep.
+    ///
+    /// Cropping to the sensor's 8:7 is the frontend's job, because the crop has
+    /// to match the preview the player is aiming with.
+    ///
+    /// Returns false if this cartridge has no camera or the frame is the wrong
+    /// size.
+    pub fn set_camera_frame(&mut self, gray: &[u8]) -> bool {
+        self.mmu.cartridge.set_camera_frame(gray)
     }
 
     /// Battery-backed cartridge RAM, for save persistence by the frontend.

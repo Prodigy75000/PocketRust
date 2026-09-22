@@ -137,3 +137,54 @@ fn the_viewfinder_shows_what_the_sensor_captured() {
         "the viewfinder is one flat colour, so no capture reached the screen.          A single shade here is what a black viewfinder looks like, and it is          also what an unread capture looks like."
     );
 }
+
+/// Drive to the live viewfinder with the sensor pointed at `gray`.
+fn viewfinder_with(gray: &[u8]) -> Option<Vec<u32>> {
+    let mut gb = boot()?;
+    assert!(gb.set_camera_frame(gray), "the cartridge refused a frame");
+    for _ in 0..3 {
+        gb.set_button(gb_core::Button::A, true);
+        for _ in 0..8 {
+            gb.step_frame();
+        }
+        gb.set_button(gb_core::Button::A, false);
+        for _ in 0..172 {
+            gb.step_frame();
+        }
+    }
+    Some(gb.step_frame().to_vec())
+}
+
+#[test]
+fn what_the_sensor_sees_reaches_the_viewfinder() {
+    let n = gb_core::CAMERA_W * gb_core::CAMERA_H;
+    let Some(dark) = viewfinder_with(&vec![0u8; n]) else {
+        return;
+    };
+    let bright = viewfinder_with(&vec![255u8; n]).unwrap();
+
+    // Compare the middle only. The sliders at the edges draw whether or not a
+    // capture worked, so they are not evidence.
+    let mid = |f: &[u32]| -> Vec<u32> {
+        (24..120)
+            .flat_map(|y| (24..120).map(move |x| (y, x)))
+            .map(|(y, x)| f[y * 160 + x])
+            .collect()
+    };
+    assert_ne!(
+        mid(&dark),
+        mid(&bright),
+        "pointing the sensor at black and at white produced the same picture,          so the frame is not reaching the develop pipeline"
+    );
+}
+
+#[test]
+fn a_frame_of_the_wrong_size_is_refused() {
+    let Some(mut gb) = boot() else { return };
+    assert!(gb.has_camera(), "this cartridge should have a sensor");
+    assert!(
+        !gb.set_camera_frame(&[0u8; 10]),
+        "a short frame must be refused rather than read past its end"
+    );
+    assert!(gb.set_camera_frame(&vec![0u8; gb_core::CAMERA_W * gb_core::CAMERA_H]));
+}
