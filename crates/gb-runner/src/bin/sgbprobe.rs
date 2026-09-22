@@ -9,11 +9,13 @@ fn main() {
     gb.set_sgb(std::env::var_os("SGB").is_some());
     println!("declares SGB = {}", gb.supports_sgb());
 
+    // A PC histogram over one frame at the end: a stuck game spends all of it
+    // in a handful of addresses, and those addresses name the wait.
     for f in 0..900u32 {
         gb.step_frame();
         if f % 150 == 149 {
             let shades: HashSet<u32> = gb.framebuffer().iter().map(|p| p & 0xFF_FFFF).collect();
-            let (cmds, active, _) = gb.sgb_debug();
+            let (cmds, active, pals) = gb.sgb_debug();
             let mut seen: Vec<String> = cmds
                 .iter()
                 .map(|(c, n)| format!("${c:02X}x{n}"))
@@ -22,11 +24,34 @@ fn main() {
                 .collect();
             seen.sort();
             println!(
-                "frame {f}: shades={} mask={} active={active} cmds=[{}]",
+                "frame {f}: shades={} mask={} lcdc={:02X} bgp={:02X} pkts={} active={active} cmds=[{}]",
                 shades.len(),
                 gb.sgb_mask(),
+                gb.peek(0xFF40),
+                gb.peek(0xFF47),
+                cmds.len(),
                 seen.join(" ")
             );
+            println!(
+                "         palettes: {}",
+                pals.iter()
+                    .map(|p| p.iter().map(|c| format!("{c:06X}")).collect::<Vec<_>>().join("/"))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            );
         }
+    }
+
+    use std::collections::HashMap;
+    let mut hist: HashMap<u16, u32> = HashMap::new();
+    for _ in 0..200_000 {
+        gb.step();
+        *hist.entry(gb.pc()).or_default() += 1;
+    }
+    let mut top: Vec<_> = hist.into_iter().collect();
+    top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+    println!("hottest PCs (halted={}):", gb.halted());
+    for (pc, n) in top.iter().take(12) {
+        println!("   {pc:04X} x{n}");
     }
 }

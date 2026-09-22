@@ -78,6 +78,16 @@ impl GameBoy {
         self.mmu.sgb.enabled = on && self.mmu.sgb.declared;
     }
 
+    /// Diagnostic: the CPU's program counter, for asking what a stuck game is
+    /// actually executing rather than guessing.
+    pub fn halted(&self) -> bool {
+        self.cpu.halted
+    }
+
+    pub fn pc(&self) -> u16 {
+        self.cpu.reg.pc
+    }
+
     /// Diagnostic: the cartridge's current MASK_EN state.
     pub fn sgb_mask(&self) -> u8 {
         self.mmu.sgb.mask()
@@ -126,6 +136,15 @@ impl GameBoy {
         while !self.mmu.ppu.frame_ready && budget > 0 {
             let c = self.cpu.step(&mut self.mmu);
             budget = budget.saturating_sub(c);
+        }
+        // An SGB VRAM transfer is carried BY a frame, so it can only be read
+        // once one has finished. Handed over here rather than inside the PPU
+        // because the SGB decoder lives beside it, not under it.
+        if let Some((cmd, data)) = self.mmu.ppu.take_sgb_transfer() {
+            self.mmu.sgb.consume_transfer(cmd, &data[..]);
+            if let Some(pal) = self.mmu.sgb.take_palette_override() {
+                self.mmu.ppu.set_sgb_palette(pal);
+            }
         }
         &self.mmu.ppu.framebuffer
     }

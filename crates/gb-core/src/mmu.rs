@@ -289,8 +289,7 @@ impl Mmu {
                 // the cartridge is required to have the data in place BEFORE it
                 // sends the command.
                 if let Some(cmd) = self.sgb.take_transfer() {
-                    let data = self.ppu.vram_transfer_window();
-                    self.sgb.consume_transfer(cmd, data);
+                    self.ppu.sgb_request_transfer(cmd);
                 }
                 // The cartridge's own screen mask, now that it is honoured.
                 self.ppu.set_sgb_mask(self.sgb.mask());

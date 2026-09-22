@@ -72,6 +72,25 @@ pub struct Ppu {
     /// save state: it is 90 KiB, and a state restored mid-freeze simply shows
     /// the live frame until the cartridge masks or cancels again.
     sgb_frozen: Option<Box<[u32; SCREEN_W * SCREEN_H]>>,
+    /// Every BG colour index in the finished frame, 0..3, which is what an SGB
+    /// VRAM transfer actually carries.
+    ///
+    /// The transfer is not a memory read. The cartridge DRAWS the 4 KiB onto
+    /// the screen and the SNES reads it back off the scanlines, so what gets
+    /// transferred is whatever is displayed. Reading VRAM $8000 directly is the
+    /// tempting shortcut and it is wrong whenever LCDC's tile-data select
+    /// points elsewhere, which is how Game & Watch Gallery 2 transferred 4 KiB
+    /// of zeroes and turned its whole palette black.
+    ///
+    /// Derived from the frame, so not in the save state.
+    frame_index: Box<[u8; SCREEN_W * SCREEN_H]>,
+    /// A `_TRN` command is waiting for the NEXT frame. Pan Docs: "the actual
+    /// transfer starts at the beginning of the next frame after the command
+    /// has been sent", so the frame in flight when the command arrives is the
+    /// wrong one to read.
+    sgb_capture: Option<u8>,
+    /// The 4 KiB, once a frame has carried it.
+    sgb_captured: Option<(u8, Box<[u8; 0x1000]>)>,
 
     mode: Mode,
     line_cycles: u32,
@@ -121,6 +140,9 @@ impl Ppu {
             sgb_palette: None,
             sgb_mask: 0,
             sgb_frozen: None,
+            frame_index: Box::new([0; SCREEN_W * SCREEN_H]),
+            sgb_capture: None,
+            sgb_captured: None,
             mode: Mode::OamScan,
             line_cycles: 0,
             window_line: 0,
@@ -271,6 +293,7 @@ impl Ppu {
             self.mode = Mode::VBlank;
             self.vblank_interrupt = true;
             self.frame_ready = true;
+            self.capture_sgb_frame();
             self.apply_sgb_mask();
         } else if self.ly > 153 {
             self.ly = 0;
@@ -357,6 +380,7 @@ impl Ppu {
             let (color, pal, attr) =
                 self.tile_pixel(map_base, tile_row, (bg_x / 8) as u16, pixel_row, bg_x % 8);
             self.bg_index[x as usize] = color;
+            self.frame_index[fb_base + x as usize] = color;
             self.bg_priority[x as usize] = attr & 0x80 != 0;
             self.framebuffer[fb_base + x as usize] = self.bg_color(pal, color);
         }
@@ -380,6 +404,7 @@ impl Ppu {
             let (color, pal, attr) =
                 self.tile_pixel(map_base, tile_row, (win_x / 8) as u16, pixel_row, win_x % 8);
             self.bg_index[x as usize] = color;
+            self.frame_index[fb_base + x as usize] = color;
             self.bg_priority[x as usize] = attr & 0x80 != 0;
             self.framebuffer[fb_base + x as usize] = self.bg_color(pal, color);
             drew_any = true;
@@ -528,9 +553,50 @@ impl Ppu {
         self.sgb_palette = palette;
     }
 
-    /// The 4 KiB an SGB `_TRN` command transfers: VRAM $8000-$8FFF.
-    pub fn vram_transfer_window(&self) -> &[u8] {
-        &self.vram[0x0000..0x1000]
+    /// A `_TRN` command arrived: read the transfer off the NEXT frame.
+    pub fn sgb_request_transfer(&mut self, cmd: u8) {
+        self.sgb_capture = Some(cmd);
+    }
+
+    /// The 4 KiB, once a frame has carried it.
+    pub fn take_sgb_transfer(&mut self) -> Option<(u8, Box<[u8; 0x1000]>)> {
+        self.sgb_captured.take()
+    }
+
+    /// Rebuild the transferred bytes from the frame just finished.
+    ///
+    /// The cartridge draws the data as ordinary 2bpp tiles, so each 8x8 tile of
+    /// the screen is sixteen bytes: for each of its eight rows, the low
+    /// bitplane then the high bitplane, taken from the colour index of each
+    /// pixel. Tiles run left to right, then down, and the first 4096 bytes are
+    /// the transfer. A 160x144 screen holds 20x18 tiles, which is 5760 bytes,
+    /// so the last third of the screen is not part of it.
+    fn capture_sgb_frame(&mut self) {
+        let Some(cmd) = self.sgb_capture.take() else {
+            return;
+        };
+        let mut out = Box::new([0u8; 0x1000]);
+        let mut n = 0usize;
+        'outer: for ty in 0..(SCREEN_H / 8) {
+            for tx in 0..(SCREEN_W / 8) {
+                for row in 0..8 {
+                    let base = (ty * 8 + row) * SCREEN_W + tx * 8;
+                    let (mut lo, mut hi) = (0u8, 0u8);
+                    for bit in 0..8 {
+                        let c = self.frame_index[base + bit];
+                        lo = (lo << 1) | (c & 1);
+                        hi = (hi << 1) | ((c >> 1) & 1);
+                    }
+                    out[n] = lo;
+                    out[n + 1] = hi;
+                    n += 2;
+                    if n >= 0x1000 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        self.sgb_captured = Some((cmd, out));
     }
 
     /// The cartridge's MASK_EN state: 0 none, 1 freeze, 2 black, 3 colour 0.
