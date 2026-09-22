@@ -40,7 +40,7 @@ echo "Checking the build actually contains what it should:"
 # exist if particular features were compiled in. The list is the reliable one:
 # the Game Boy Camera's mapper has no string literal of its own, so before
 # BUILD_FEATURES existed there was no way to prove it was in a binary at all.
-for marker in POCKETRUST_FEATURES: printer camera gamelink pocketrust_printer /printer; do
+for marker in POCKETRUST_FEATURES: printer camera tilt gamelink pocketrust_printer /printer; do
     if grep -qa -- "$marker" "$SO"; then
         echo "  ok       $marker"
     else

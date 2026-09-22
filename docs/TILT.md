@@ -15,6 +15,10 @@ calibration screen, reads and writes save files, and rolls in both axes.
 **Done.** The libretro side: the sensor interface, with the left analog stick as
 a fallback so the cartridge is playable on a controller or a desktop frontend.
 
+**Not done, on Android.** Nothing feeds the sensor for a Game Boy game yet. See
+"A registered interface is not a running sensor" below. Until that lands, Kirby
+plays on the left analog stick, which the core falls back to on its own.
+
 **Unverified.** The sign convention of the phone's accelerometer, which is
 derived rather than measured. See "If it plays backwards" below. Everything
 else in this document was measured against the cartridge.
@@ -104,10 +108,57 @@ they loaded Pokemon.
 **Units are g, and the axes are the device's.** X rightward, Y forward, as
 Android reports them. The core converts; the frontend should not.
 
-**There is a fallback and it is automatic.** With no sensor, the core reads the
-left analog stick at one g full deflection, so the cartridge is playable on a
-controller, on a desktop frontend, or on a tablet in a stand. The core says
-which one the player got, on load, via `SET_MESSAGE`.
+**There is a fallback and it is automatic.** With no live sensor, the core reads
+the left analog stick at one g full deflection, so the cartridge is playable on
+a controller, on a desktop frontend, or on a tablet in a stand. The core says
+which one the player got, about a second in, via `SET_MESSAGE`.
+
+## A registered interface is not a running sensor
+
+The environment call succeeding tells you nothing, and this is worth stating
+plainly because both halves of it are deliberate decisions that are individually
+correct.
+
+Our host answers `GET_SENSOR_INTERFACE` with `true` **unconditionally**, even
+for a null payload, so that Dolphin stays on its motion-enabled path. And on
+Android the listener that fills `g_sensor_accel_*` is mounted only while
+`loadedRomPlatform == "wii"`. So a Game Boy cartridge gets a successful
+registration and a feed of perfect zeroes.
+
+Perfect zeroes read as a player holding the device exactly level and perfectly
+still, which is a legitimate thing for a player to be doing. Taken at face value
+that is the worst of both outcomes: the ball never moves **and** the analog
+fallback never engages, because the sensor looked fine.
+
+So the core does not trust the registration. It reads accelerometer **Z** as
+well, purely as a liveness check: a real accelerometer measures the reaction to
+gravity, so at rest its vector has magnitude about 1g whichever way up the
+device is, and it essentially never reads all zeroes. Below `0.1g` total, the
+core treats the feed as dead and uses the stick. The flag latches once a real
+reading arrives, so a momentary genuine zero cannot drop a player onto the stick
+mid-roll.
+
+This means the Android side can be wired later with **no core change**: the
+first real reading switches the input over by itself.
+
+### What Android needs to do
+
+Mount the sensor bridge for tilt cartridges as well as for Wii, and feed it
+**plain device axes**, not the Wii remap.
+
+The existing `SensorBridge` translates phone axes into Wiimote coordinates
+(`X <- -phone.y`, `Y <- phone.z`, `Z <- phone.x`), which is right for Dolphin
+and wrong here. This core wants Android's own accelerometer values, in g:
+
+```text
+  SENSOR_ACCELEROMETER_X  <-  event.values[0] / 9.81
+  SENSOR_ACCELEROMETER_Y  <-  event.values[1] / 9.81
+  SENSOR_ACCELEROMETER_Z  <-  event.values[2] / 9.81
+```
+
+Z matters: it is the liveness check, and a bridge that only publishes X and Y
+leaves the core unable to tell a live sensor from a dead one when the device is
+held upright.
 
 ## If it plays backwards
 

@@ -653,19 +653,6 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     let wants_tilt = with_state(|s| s.gb.as_ref().is_some_and(|gb| gb.has_tilt()));
     if wants_tilt {
         sensor::start();
-        // Say which input the player is about to get. The two play completely
-        // differently, and "why is tilting doing nothing" has one answer if
-        // there is no accelerometer and a different one if there is.
-        with_state(|s| {
-            notify(
-                s,
-                if sensor::available() {
-                    "Tilt sensor: using this device's accelerometer"
-                } else {
-                    "Tilt sensor: no accelerometer here, using the left stick"
-                },
-            )
-        });
     }
     with_state(|s| {
         if let Some(gb) = &mut s.gb {
@@ -819,6 +806,9 @@ pub extern "C" fn retro_run() {
         if let Some(poll) = s.input_poll {
             unsafe { poll() };
         }
+        // Held until the `gb` borrow below is done with, because `notify`
+        // wants the whole state.
+        let mut tilt_notice: Option<&str> = None;
         if let (Some(gb), Some(input)) = (&mut s.gb, s.input_state) {
             let pressed = |id: u32| unsafe { input(0, RETRO_DEVICE_JOYPAD, 0, id) != 0 };
             gb.set_button(Button::A, pressed(RETRO_DEVICE_ID_JOYPAD_A));
@@ -835,6 +825,16 @@ pub extern "C" fn retro_run() {
             // playable on a controller, on a desktop frontend, or on a tablet
             // sitting in a stand.
             if gb.has_tilt() {
+                // Say which input the player actually got, once we know. The
+                // two play completely differently, and "why is tilting doing
+                // nothing" has a different answer in each case.
+                if let Some(from_sensor) = sensor::settle() {
+                    tilt_notice = Some(if from_sensor {
+                        "Tilt: using this device's accelerometer"
+                    } else {
+                        "Tilt: no accelerometer feed, using the left stick"
+                    });
+                }
                 let (x, y) = sensor::tilt().unwrap_or_else(|| {
                     let axis = |id: u32| {
                         // Analog axes are i16 full scale. One g at full
@@ -852,6 +852,9 @@ pub extern "C" fn retro_run() {
                 });
                 gb.set_tilt(x, y);
             }
+        }
+        if let Some(text) = tilt_notice {
+            notify(s, text);
         }
 
         // Run one frame; the core already produces XRGB8888 pixels.
