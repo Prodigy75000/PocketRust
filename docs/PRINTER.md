@@ -134,6 +134,23 @@ rule instead of two that agree until they do not. `gbprint` drains once a frame
 exactly as the core does, because a tool that exercises a different path from the
 thing it is testing is worse than no tool.
 
+## Fixed: no printer on any game after the first
+
+If a second game was loaded, or a game was reset, it got **no printer at all**,
+which Pokemon reports as "Printer Error 2". Restarting the app was the only cure,
+which is exactly what made it look like a printer fault rather than a lifecycle
+one.
+
+`reconcile_netlink` short-circuits when the device it wants is the device it
+already has. That is correct while one machine is running and wrong the moment
+the machine is replaced: loading or resetting builds a new `GameBoy` that has
+never had `connect_link` called on it, while the state still says a printer is
+attached, so reconcile decides there is nothing to do.
+
+Unload and reset now detach the link, so the next machine gets it attached
+properly. There is a regression test, because this is the kind of state-machine
+bug that comes back.
+
 ## Known bug: the Game Boy Camera retries forever
 
 **Not fixed.** The Camera prints correctly, the PNG is written, and the game
