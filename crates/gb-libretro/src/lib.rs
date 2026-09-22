@@ -93,8 +93,25 @@ const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 ///
 /// `library_version` is deliberately NOT used for this. The app reads that field
 /// and it should keep meaning the core's version, not its feature set.
+///
+/// The trailing `build=` is the commit this binary came from, and it is here
+/// because `jniLibs/` has no version in it: two repos write cores into that
+/// directory and a third assembles them into an APK, so a reader cannot tell a
+/// fresh copy from a stale one by looking. It has been answered with section
+/// sizes and with file mtimes, both of which are inference. This makes it a
+/// grep. See `build.rs` for why the value is passed in rather than read there.
+///
+/// `-local` on the end means an ordinary `cargo build` rather than a deploy,
+/// and that such a value may be stale. `-dirty` means the tree had uncommitted
+/// changes, so the commit names where the build started and not what it
+/// contains.
 #[used]
-static BUILD_FEATURES: &[u8] = b"POCKETRUST_FEATURES:printer,camera,tilt,gamelink,colorize";
+static BUILD_FEATURES: &[u8] = concat!(
+    "POCKETRUST_FEATURES:printer,camera,tilt,gamelink,colorize",
+    " build=",
+    env!("POCKETRUST_BUILD_ID"),
+)
+.as_bytes();
 
 /// Core-option key for the DMG colorization toggle (Trophy Hub drives this).
 const OPT_COLORIZE: &CStr = c"pocketrust_colorize";
@@ -1038,6 +1055,24 @@ mod map_tests {
     /// catch it, because the harness is written from the same constant. The wire
     /// values are pinned here so they are checked against the spec and not
     /// against my own copy of the mistake.
+    #[test]
+    fn the_core_states_which_commit_it_came_from() {
+        let s = std::str::from_utf8(BUILD_FEATURES).expect("feature string is ASCII");
+        let id = s
+            .split(" build=")
+            .nth(1)
+            .expect("the build identity must be present, it is how a stripped .so is identified");
+        // "unknown" is what build.rs emits when git could not be reached, and
+        // it is a legitimate answer in a source tarball. The empty string is
+        // not: that would be a build.rs regression that leaves the deploy
+        // guard grepping for nothing and passing.
+        assert!(!id.is_empty());
+        assert!(
+            id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
+            "must survive a strings | grep, got {id:?}"
+        );
+    }
+
     #[test]
     fn experimental_env_ids_carry_the_bit() {
         // The two the printer added. Neither carries the EXPERIMENTAL bit, so a
