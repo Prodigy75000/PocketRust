@@ -51,6 +51,16 @@ for marker in POCKETRUST_FEATURES: printer camera gamelink pocketrust_printer /p
     fi
 done
 
+# Every entry point libretro requires, as an exact dynamic symbol. See the
+# comment in check-exports.py for the bug that made this necessary.
+echo
+echo "Checking the required libretro entry points are exported:"
+if ! python scripts/check-exports.py "$SO"; then
+    echo
+    echo "Not deploying."
+    exit 1
+fi
+
 # e_machine at offset 18 is 0xB7 little-endian for AArch64. Dropping a host
 # build into jniLibs produces a dlopen failure at runtime and nothing sooner.
 abi=$(od -An -tx1 -j18 -N2 "$SO" | tr -d ' ')

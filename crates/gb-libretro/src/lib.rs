@@ -529,7 +529,6 @@ pub extern "C" fn retro_set_input_state(cb: retro_input_state_t) {
 #[no_mangle]
 pub extern "C" fn retro_set_controller_port_device(_port: u32, _device: u32) {}
 
-#[no_mangle]
 /// Forget which device is on the link port.
 ///
 /// `reconcile_netlink` short-circuits when the device it wants is the device it
@@ -546,6 +545,7 @@ fn detach_link(s: &mut State) {
     s.printer = None;
 }
 
+#[no_mangle]
 pub extern "C" fn retro_reset() {
     with_state(|s| {
         if s.rom.is_empty() {
