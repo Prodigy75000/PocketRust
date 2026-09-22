@@ -8,6 +8,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod camera;
+mod rumble;
 mod sensor;
 mod netpacket;
 
@@ -107,7 +108,7 @@ const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 /// contains.
 #[used]
 static BUILD_FEATURES: &[u8] = concat!(
-    "POCKETRUST_FEATURES:printer,camera,tilt,gamelink,colorize",
+    "POCKETRUST_FEATURES:printer,camera,tilt,rumble,gamelink,colorize",
     " build=",
     env!("POCKETRUST_BUILD_ID"),
 )
@@ -275,6 +276,9 @@ pub extern "C" fn retro_init() {
     // Same deal for the accelerometer MBC7 carries, and for the same reason:
     // registered once here, switched on only for a cartridge that has one.
     sensor::register(env);
+    // And the motor on MBC5 rumble carts. Registering drives nothing; the
+    // cartridge's own bit does.
+    rumble::register(env);
 }
 
 /// Tell the core whether a camera exists, so it can pick the right diagnostic
@@ -601,6 +605,10 @@ pub extern "C" fn retro_reset() {
         // The machine below is a new one, so whatever was on its link port
         // belonged to the old one.
         detach_link(s);
+        // And whatever its motor was doing. Resetting mid-buzz would otherwise
+        // leave the device vibrating with nothing driving it: the new machine
+        // starts quiet, so it never sends the edge that would stop it.
+        rumble::stop();
         // Power-cycle the machine but keep battery-backed save RAM, like a real
         // reset would.
         let sram = s.gb.as_ref().map(|gb| gb.sram().to_vec());
@@ -745,6 +753,8 @@ pub extern "C" fn retro_unload_game() {
     // loaded is the kind of bug a user is right to be angry about.
     camera::stop();
     sensor::stop();
+    // A cartridge can be unloaded mid-buzz.
+    rumble::stop();
     with_state(|s| {
         // Anything the spool is holding for a continuation that will now never
         // come. Writing it late beats losing it.
@@ -887,6 +897,15 @@ pub extern "C" fn retro_run() {
         // Run one frame; the core already produces XRGB8888 pixels.
         if let Some(gb) = &mut s.gb {
             s.frame.copy_from_slice(gb.step_frame());
+        }
+
+        // The motor, after the frame rather than before it, because the
+        // cartridge sets the bit during the frame we just ran.
+        if s.gb.as_ref().is_some_and(|gb| gb.has_rumble()) {
+            rumble::set(s.gb.as_ref().is_some_and(|gb| gb.rumble()));
+            if rumble::unavailable_notice() {
+                notify(s, "This cartridge rumbles, but this device cannot");
+            }
         }
 
         // A print finishes inside a frame, so this is checked after every one.

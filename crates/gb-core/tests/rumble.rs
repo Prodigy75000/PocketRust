@@ -150,24 +150,108 @@ fn the_motor_is_not_part_of_the_save_state() {
     );
 }
 
-#[test]
-fn pokemon_pinball_is_a_rumble_cartridge() {
-    // The one question only a real header can answer: that the cart types above
-    // are the ones actually used by the games people own. Skipped when the ROM
-    // is absent, since a commercial cartridge cannot be committed.
-    let rel = "dumps/smdb/gb/Game Boy SMDB 2022-05-20/3 GBC with GB Compatibility \
-               - Black Carts/1 USA/Pokemon Pinball (USA, Australia) (Rumble Version) \
-               (SGB Enhanced) (GB Compatible).gbc";
+/// Pokemon Pinball, or None when the ROM is absent. A commercial cartridge
+/// cannot be committed, so every test using it skips rather than fails.
+fn pinball() -> Option<GameBoy> {
+    let rel = "dumps/smdb/gb/Game Boy SMDB 2022-05-20/3 GBC with GB Compatibility - Black Carts/1 USA/Pokemon Pinball (USA, Australia) (Rumble Version) (SGB Enhanced) (GB Compatible).gbc";
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .join(rel.replace("               ", ""));
+        .join(rel);
     if !path.exists() {
         eprintln!("skipping: needs Pokemon Pinball");
-        return;
+        return None;
     }
-    let gb = GameBoy::new(std::fs::read(&path).unwrap());
+    Some(GameBoy::new(std::fs::read(&path).ok()?))
+}
+
+/// Minimal script player; this crate cannot depend on gb-runner.
+fn play(gb: &mut GameBoy, script: &str) {
+    use gb_core::Button;
+    for token in script.split(',') {
+        if let Some(n) = token.strip_prefix('w') {
+            for _ in 0..n.parse::<u32>().unwrap() {
+                gb.step_frame();
+            }
+            continue;
+        }
+        let b = match token {
+            "a" => Button::A,
+            "start" => Button::Start,
+            other => panic!("no such button {other:?}"),
+        };
+        gb.set_button(b, true);
+        for _ in 0..6 {
+            gb.step_frame();
+        }
+        gb.set_button(b, false);
+        for _ in 0..6 {
+            gb.step_frame();
+        }
+    }
+}
+
+#[test]
+fn pokemon_pinball_is_a_rumble_cartridge() {
+    // The one question only a real header can answer: that the cart types above
+    // are the ones the games people own actually use.
+    let Some(gb) = pinball() else { return };
     assert!(gb.has_rumble());
+}
+
+#[test]
+fn pokemon_pinball_actually_drives_the_motor() {
+    // The synthetic tests above prove the mapper does what the spec says. This
+    // proves a real game asks for it, which is a different claim and the one
+    // that would have caught a correct mapper wired to nothing.
+    //
+    // It needs the ball IN PLAY. A first attempt sat on the title screen and
+    // then in the plunger lane and saw zero edges in sixty seconds, which reads
+    // exactly like a broken implementation.
+    let Some(mut gb) = pinball() else { return };
+    assert!(gb.has_rumble());
+
+    play(&mut gb, "w600,start,w200,a,w200,a,w300,start,w200");
+
+    use gb_core::Button;
+    gb.set_button(Button::Down, true); // pull the plunger
+    for _ in 0..90 {
+        gb.step_frame();
+    }
+    gb.set_button(Button::Down, false); // and launch
+
+    let (mut on, mut edges, mut buzzing) = (false, 0u32, 0u32);
+    for i in 0..3600u32 {
+        // Work both flippers so the ball stays up and keeps hitting things.
+        let left = i % 40 < 8;
+        let right = (20..28).contains(&(i % 40));
+        gb.set_button(Button::Left, left);
+        gb.set_button(Button::A, left);
+        gb.set_button(Button::Right, right);
+        gb.set_button(Button::B, right);
+        gb.step_frame();
+        let now = gb.rumble();
+        if now != on {
+            edges += 1;
+            on = now;
+        }
+        if now {
+            buzzing += 1;
+        }
+    }
+
+    assert!(
+        edges > 0,
+        "sixty seconds of pinball produced no motor activity at all"
+    );
+    // Measured: 74 edges and 107 frames buzzing. Asserted loosely because the
+    // ball's path is not something to pin down to a number, but both bounds
+    // matter. Zero means nothing fired; permanently on would mean the bit is
+    // being read as latched-high, which would buzz a phone flat.
+    assert!(
+        buzzing > 0 && buzzing < 1800,
+        "expected short bursts, got {buzzing} frames of 3600 across {edges} edges"
+    );
 }
