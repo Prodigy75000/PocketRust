@@ -33,9 +33,6 @@ pub struct Header {
     pub has_rumble: bool,
     pub cgb_flag: u8,
     /// SGB support flag (0x146): 0x03 means the cart carries SGB commands.
-    /// Parsed but currently unused: SGB detection is disabled (see `Mmu::new`),
-    /// so mono SGB carts run as plain DMG with our GBC-auto colorization.
-    #[allow(dead_code)]
     pub sgb_flag: u8,
     /// Sum of the title bytes (0x134..=0x143); the CGB boot ROM uses this to
     /// pick a colorization palette, and we reuse it for `Colorize::Auto`.
@@ -1445,6 +1442,11 @@ impl Cartridge {
     }
 
     /// Does this cartridge have a rumble motor on it?
+    /// The cartridge's SGB support flag (header 0x146).
+    pub fn sgb_flag(&self) -> u8 {
+        self.header.sgb_flag
+    }
+
     pub fn has_rumble(&self) -> bool {
         self.header.has_rumble
     }

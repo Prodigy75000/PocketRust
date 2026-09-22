@@ -22,7 +22,16 @@ fn bgr555(lo: u8, hi: u8) -> u32 {
 }
 
 pub struct Sgb {
-    /// Whether the cart declares SGB support (header 0x146 == 0x03).
+    /// Whether the cart declares SGB support (header 0x146 == 0x03). Fixed by
+    /// the ROM, unlike `enabled`, which the player can turn off.
+    ///
+    /// Not to be confused with the private `supported` below, which is about
+    /// whether the inline-palette path still applies to this cartridge.
+    pub declared: bool,
+    /// Whether we ANSWER as an SGB. Separate from `supported` because
+    /// answering is a commitment: a cartridge that detects an SGB goes on to
+    /// send VRAM transfers and expects them to complete, so a half
+    /// implementation is worse than none. See `Mmu::new`.
     pub enabled: bool,
     /// True once any command has been received (SGB actually in use).
     pub active: bool,
@@ -54,9 +63,19 @@ pub struct Sgb {
     /// then just a black placeholder). When false we stop overriding and let the
     /// normal colorization show, instead of blanking the screen. DK, Mole Mania.
     supported: bool,
-    /// A VRAM-transfer command just arrived; the PPU should blank the display
-    /// so the transfer data isn't shown as garbage.
-    transfer_pending: bool,
+    /// A VRAM-transfer command just arrived, and which one. The MMU hands us
+    /// the 4 KiB the cartridge has prepared.
+    ///
+    /// Pan Docs: the SNES reads this off the display scanlines, but "will
+    /// automatically re-produce the same ordering of bits and bytes, as being
+    /// originally stored at 8000-8FFF in Game Boy memory". So the data IS VRAM
+    /// $8000-$8FFF and there is nothing to decode from pixels.
+    transfer_pending: Option<u8>,
+    /// PAL_TRN's 512 system palettes, four BGR555 colours each. Not displayed
+    /// directly: PAL_SET copies four of them into the visible palettes.
+    sys_palettes: Box<[[u32; 4]; 512]>,
+    /// MASK_EN: 0 none, 1 freeze the last frame, 2 black, 3 colour 0.
+    mask: u8,
 
     /// Debug: (command code, total data bytes) of each completed command.
     pub log: Vec<(u8, usize)>,
@@ -65,6 +84,7 @@ pub struct Sgb {
 impl Sgb {
     pub fn new(sgb_flag: u8) -> Sgb {
         Sgb {
+            declared: sgb_flag == 0x03,
             enabled: sgb_flag == 0x03,
             active: false,
             ready: false,
@@ -79,17 +99,48 @@ impl Sgb {
             palettes: [[0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]; 4],
             palette_dirty: false,
             supported: true,
-            transfer_pending: false,
+            transfer_pending: None,
+            sys_palettes: Box::new([[0; 4]; 512]),
+            mask: 0,
             log: Vec::new(),
         }
     }
 
     /// Whether a VRAM transfer just started (consumes the flag). The PPU freezes
     /// the display briefly so the transfer's on-screen data isn't shown.
-    pub fn take_transfer(&mut self) -> bool {
-        let t = self.transfer_pending;
-        self.transfer_pending = false;
-        t
+    pub fn take_transfer(&mut self) -> Option<u8> {
+        self.transfer_pending.take()
+    }
+
+    /// The screen mask the cartridge asked for: 0 none, 1 freeze, 2 black,
+    /// 3 colour 0.
+    pub fn mask(&self) -> u8 {
+        self.mask
+    }
+
+    /// Consume the 4 KiB a `_TRN` command was waiting for.
+    ///
+    /// `data` is VRAM $8000-$8FFF. Only the transfers we act on are decoded;
+    /// the rest are accepted and dropped, which is still the right answer,
+    /// because what hangs a cartridge is a transfer that never completes
+    /// rather than one whose contents go unused.
+    pub fn consume_transfer(&mut self, cmd: u8, data: &[u8]) {
+        if data.len() < 0x1000 {
+            return;
+        }
+        if cmd == 0x0B {
+            // PAL_TRN: 512 palettes of four little-endian BGR555 colours.
+            for i in 0..512 {
+                for c in 0..4 {
+                    let o = i * 8 + c * 2;
+                    self.sys_palettes[i][c] = bgr555(data[o], data[o + 1]);
+                }
+            }
+            // The cartridge has now given us real colours, so the inline
+            // placeholder path is no longer the best we can do.
+            self.supported = true;
+            self.palette_dirty = true;
+        }
     }
 
 
@@ -226,28 +277,33 @@ impl Sgb {
                 };
                 self.player_index = 0;
             }
-            // PAL_SET (0xA): selects palettes from a transferred table we can't
-            // read; stop overriding (else the black placeholder blanks the
-            // screen). It draws nothing itself, so no display freeze.
+            // PAL_SET: copy four of PAL_TRN's 512 system palettes into the
+            // visible ones. Before the transfer could be read this had to give
+            // up and fall back to colorization; now it is the real thing.
             0x0A => {
-                self.supported = false;
+                for slot in 0..4 {
+                    let idx = u16::from_le_bytes([self.data[1 + slot * 2], self.data[2 + slot * 2]])
+                        as usize
+                        & 0x1FF;
+                    self.palettes[slot] = self.sys_palettes[idx];
+                }
                 self.palette_dirty = true;
             }
-            // PAL_TRN (0xB) / ATTR_TRN (0x15): same, and they transfer through
-            // VRAM (garbage on-screen), so also freeze the display.
-            0x0B | 0x15 => {
-                self.supported = false;
-                self.palette_dirty = true;
-                self.transfer_pending = true;
-            }
-            // VRAM transfers (SOU_TRN, CHR_TRN, PCT_TRN, OBJ_TRN): the cart shows
-            // the transfer data on-screen for the SGB to read; blank it away.
-            0x09 | 0x13 | 0x14 | 0x18 => self.transfer_pending = true,
-            // MASK_EN (0x17) is deliberately NOT honored: a freeze/black mask
-            // persists until the cart cancels it, and some carts (Donkey Kong)
-            // never send the cancel in our timing, which would leave the screen
-            // stuck. The transfer blanking above already hides the init garbage.
-            _ => {} // ATTR_BLK/DIV, DATA_SND, MASK_EN... ignored
+            // Every VRAM transfer: PAL_TRN, SOU_TRN, CHR_TRN, PCT_TRN,
+            // ATTR_TRN, OBJ_TRN. The MMU hands the data back through
+            // `consume_transfer`.
+            0x09 | 0x0B | 0x13 | 0x14 | 0x15 | 0x18 => self.transfer_pending = Some(cmd),
+            // MASK_EN: freeze, blacken or blank the screen until cancelled.
+            //
+            // Honouring this used to be unsafe, because a cartridge masks the
+            // screen while it transfers and cancels once the SGB has the data.
+            // With transfers never completing, a cancel that depended on them
+            // might never come and the screen stayed stuck, so the mask was
+            // ignored and a blanket 90-frame blank stood in for it. Now that
+            // the transfers complete, the cartridge's own cancel arrives and
+            // the guess is not needed.
+            0x17 => self.mask = self.data[1] & 0x03,
+            _ => {} // ATTR_BLK/LIN/DIV/CHR, DATA_SND and friends: not yet
         }
     }
 }
@@ -304,22 +360,74 @@ mod tests {
     }
 
     #[test]
-    fn pal_transfer_disables_override_to_avoid_black_screen() {
-        // A cart that sets a black placeholder PAL then transfers its real
-        // colors via PAL_TRN/PAL_SET (which we don't follow) must NOT be left
-        // with the black override, or the whole screen goes black (Donkey Kong).
+    fn pal_trn_then_pal_set_gives_the_cartridge_its_real_colours() {
+        // This replaces a test that asserted the opposite. Before the VRAM
+        // transfer could be read, PAL_TRN had to make the core GIVE UP on
+        // palettes and fall back to colorization, because the inline palette a
+        // cart leaves behind is often a black placeholder and keeping it turned
+        // the screen black (Donkey Kong). That workaround was the best answer
+        // available and is now the wrong one.
         let mut sgb = Sgb::new(0x03);
-        let mut pal = [0u8; 16];
-        pal[0] = (0x00 << 3) | 1; // PAL01, all colors black
-        send(&mut sgb, &pal);
-        // Degenerate all-black palette: bow out even before the transfer command.
-        assert!(matches!(sgb.take_palette_override(), Some(None)));
 
+        // PAL_TRN, then the 4 KiB it was waiting for: 512 palettes of four
+        // little-endian BGR555 colours. Put a recognisable red in palette 3.
         let mut trn = [0u8; 16];
-        trn[0] = (0x0B << 3) | 1; // PAL_TRN
+        trn[0] = (0x0B << 3) | 1;
         send(&mut sgb, &trn);
-        assert!(matches!(sgb.take_palette_override(), Some(None))); // stays released
-        assert!(!sgb.supported);
+        assert_eq!(sgb.take_transfer(), Some(0x0B), "PAL_TRN must ask for data");
+
+        let mut data = vec![0u8; 0x1000];
+        // Palette 3, colour 1 = pure red. BGR555 little-endian: R in bits 0-4.
+        let o = 3 * 8 + 1 * 2;
+        data[o] = 0x1F;
+        data[o + 1] = 0x00;
+        sgb.consume_transfer(0x0B, &data);
+
+        // PAL_SET: put system palette 3 into visible slot 0.
+        let mut set = [0u8; 16];
+        set[0] = (0x0A << 3) | 1;
+        set[1..3].copy_from_slice(&3u16.to_le_bytes());
+        send(&mut sgb, &set);
+
+        let pal = sgb
+            .take_palette_override()
+            .expect("PAL_SET must change the palette")
+            .expect("and must supply colours rather than bowing out");
+        assert_eq!(
+            pal.bg[1], 0x00FF_0000,
+            "colour 1 should be the red placed in system palette 3"
+        );
+    }
+
+    #[test]
+    fn a_transfer_command_asks_for_its_data() {
+        // Every _TRN must raise the request. A cartridge masks the screen,
+        // transfers, and cancels the mask when it is done; a transfer that is
+        // never consumed is what left 52 games blank.
+        for cmd in [0x09u8, 0x0B, 0x13, 0x14, 0x15, 0x18] {
+            let mut sgb = Sgb::new(0x03);
+            let mut pkt = [0u8; 16];
+            pkt[0] = (cmd << 3) | 1;
+            send(&mut sgb, &pkt);
+            assert_eq!(sgb.take_transfer(), Some(cmd), "command ${cmd:02X}");
+            assert_eq!(sgb.take_transfer(), None, "and only once");
+        }
+    }
+
+    #[test]
+    fn mask_en_is_honoured_and_cancellable() {
+        // Ignoring MASK_EN was the other half of the old workaround: a mask the
+        // cartridge never cancelled would stick, and cancels depended on
+        // transfers that never completed.
+        let mut sgb = Sgb::new(0x03);
+        assert_eq!(sgb.mask(), 0);
+        for mode in [1u8, 2, 3, 0] {
+            let mut pkt = [0u8; 16];
+            pkt[0] = (0x17 << 3) | 1;
+            pkt[1] = mode;
+            send(&mut sgb, &pkt);
+            assert_eq!(sgb.mask(), mode);
+        }
     }
 
     #[test]

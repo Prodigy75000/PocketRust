@@ -65,6 +65,29 @@ impl GameBoy {
         }
     }
 
+    /// Answer as a Super Game Boy, if the cartridge asks.
+    ///
+    /// Off by default, and that default is load bearing rather than cautious.
+    /// Answering the detection handshake is a COMMITMENT: a cartridge that
+    /// finds an SGB goes on to send VRAM transfers and expects them to be
+    /// consumed, so an incomplete implementation is worse than none. A full-set
+    /// scan measured 52 games that render only with this off.
+    ///
+    /// Has no effect on a cartridge that does not declare SGB support.
+    pub fn set_sgb(&mut self, on: bool) {
+        self.mmu.sgb.enabled = on && self.mmu.sgb.declared;
+    }
+
+    /// Diagnostic: the cartridge's current MASK_EN state.
+    pub fn sgb_mask(&self) -> u8 {
+        self.mmu.sgb.mask()
+    }
+
+    /// Does the cartridge declare Super Game Boy support (header 0x146)?
+    pub fn supports_sgb(&self) -> bool {
+        self.mmu.sgb.declared
+    }
+
     /// Whether the loaded cartridge is running in Game Boy Color mode.
     pub fn is_cgb(&self) -> bool {
         self.mmu.cgb

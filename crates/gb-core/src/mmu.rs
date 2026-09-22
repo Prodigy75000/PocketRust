@@ -74,7 +74,12 @@ impl Mmu {
         // not detecting SGB is a pure compatibility win. The decoder below stays
         // (unit-tested, and keeps the save-state layout stable) for a possible
         // future full SGB implementation. See [[project_rustgameboy_core]].
-        let sgb = Sgb::new(0);
+        // Constructed from the cartridge's real flag now, but still answering
+        // only when the player turns it on: see `GameBoy::set_sgb`. Passing a
+        // hardcoded 0 here used to be the off switch, which also threw away the
+        // one fact needed to know whether the switch could ever do anything.
+        let mut sgb = Sgb::new(cartridge.sgb_flag());
+        sgb.enabled = false;
         Mmu {
             sgb,
             cartridge,
@@ -277,10 +282,18 @@ impl Mmu {
                 if let Some(pal) = self.sgb.take_palette_override() {
                     self.ppu.set_sgb_palette(pal);
                 }
-                // Blank SGB VRAM-transfer garbage out of the displayed frame.
-                if self.sgb.take_transfer() {
-                    self.ppu.sgb_begin_transfer();
+                // A _TRN command is waiting for 4 KiB, and Pan Docs says it is
+                // exactly VRAM $8000-$8FFF: the SNES reads it off the display
+                // scanlines but reproduces the same byte ordering, so there is
+                // nothing to decode from pixels. Read at command time, because
+                // the cartridge is required to have the data in place BEFORE it
+                // sends the command.
+                if let Some(cmd) = self.sgb.take_transfer() {
+                    let data = self.ppu.vram_transfer_window();
+                    self.sgb.consume_transfer(cmd, data);
                 }
+                // The cartridge's own screen mask, now that it is honoured.
+                self.ppu.set_sgb_mask(self.sgb.mask());
             }
             0xFF01 => self.serial.write_data(val),
             0xFF02 => self.serial.write_control(val),

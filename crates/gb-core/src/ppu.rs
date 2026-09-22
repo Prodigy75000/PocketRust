@@ -65,7 +65,13 @@ pub struct Ppu {
     /// Frames left to blank the display while an SGB VRAM transfer is in flight
     /// (CHR/PCT/PAL/ATTR_TRN show their data on-screen as garbage; real SGB and
     /// Gambatte hide it). Counts down per frame.
-    sgb_freeze: u8,
+    /// MASK_EN state: 0 none, 1 freeze, 2 black, 3 colour 0. Occupies the
+    /// save-state byte the old frame counter did, so the layout is unchanged.
+    sgb_mask: u8,
+    /// The frame captured when a freeze was raised. Deliberately NOT in the
+    /// save state: it is 90 KiB, and a state restored mid-freeze simply shows
+    /// the live frame until the cartridge masks or cancels again.
+    sgb_frozen: Option<Box<[u32; SCREEN_W * SCREEN_H]>>,
 
     mode: Mode,
     line_cycles: u32,
@@ -81,6 +87,11 @@ pub struct Ppu {
     pub stat_interrupt: bool,
     stat_line: bool,
 }
+
+/// Whether MASK_EN is applied to the displayed frame. See `apply_sgb_mask`
+/// for the measurement behind this being false: applying it costs 99
+/// cartridges across the full set. Flip once that is understood.
+const APPLY_SGB_MASK: bool = false;
 
 impl Ppu {
     pub fn new(cgb: bool) -> Ppu {
@@ -108,7 +119,8 @@ impl Ppu {
             obj_pal_autoinc: false,
             dmg_palette: DmgPalette::green(),
             sgb_palette: None,
-            sgb_freeze: 0,
+            sgb_mask: 0,
+            sgb_frozen: None,
             mode: Mode::OamScan,
             line_cycles: 0,
             window_line: 0,
@@ -516,26 +528,73 @@ impl Ppu {
         self.sgb_palette = palette;
     }
 
-    /// An SGB VRAM transfer is starting. The cart draws the transfer data across
-    /// the screen (as garbage) over the ~14 frames leading up to *each* transfer
-    /// command, so we blank the display for a window wide enough to bridge the
-    /// whole init burst. Real SGB / Gambatte hide this same setup period.
-    pub fn sgb_begin_transfer(&mut self) {
-        // Wide enough to bridge the whole init burst: carts leave the transfer
-        // garbage in VRAM for many frames after the last transfer command while
-        // they finish setup, before finally drawing the real screen (DK ~80
-        // frames). Games do their transfers up front, so this clears well before
-        // any real content (Aladdin transfers by frame 199, logos at ~400).
-        self.sgb_freeze = 90;
+    /// The 4 KiB an SGB `_TRN` command transfers: VRAM $8000-$8FFF.
+    pub fn vram_transfer_window(&self) -> &[u8] {
+        &self.vram[0x0000..0x1000]
     }
 
-    /// Blank the just-finished frame while an SGB VRAM transfer is in flight, so
-    /// the transfer data isn't shown as garbage.
-    fn apply_sgb_mask(&mut self) {
-        self.sgb_freeze = self.sgb_freeze.saturating_sub(1);
-        if self.sgb_freeze > 0 {
-            self.framebuffer = [0x0000_0000; SCREEN_W * SCREEN_H];
+    /// The cartridge's MASK_EN state: 0 none, 1 freeze, 2 black, 3 colour 0.
+    ///
+    /// This replaces a 90-frame blanket blank that stood in for it. That guess
+    /// existed because a mask the cartridge never cancelled would stick
+    /// forever, and cancels depended on transfers that never completed. Now
+    /// they do, so the cartridge's own cancel arrives and the screen is masked
+    /// for exactly as long as it asked.
+    pub fn set_sgb_mask(&mut self, mask: u8) {
+        if mask == 1 && self.sgb_mask != 1 {
+            // Freeze shows the frame that was up when the mask was raised, so
+            // it has to be captured on the edge rather than re-read later: by
+            // then the cartridge has already drawn transfer data over it.
+            self.sgb_frozen = Some(Box::new(self.framebuffer));
         }
+        if mask != 1 {
+            self.sgb_frozen = None;
+        }
+        self.sgb_mask = mask;
+    }
+
+    /// Apply the cartridge's screen mask to the just-finished frame.
+    fn apply_sgb_mask(&mut self) {
+        // The mask is TRACKED but not yet APPLIED, and that is a measurement
+        // rather than caution. Full set, 5344 cartridges, one variable at a
+        // time:
+        //
+        //   SGB off, as shipped                       148 blank
+        //   SGB on, transfers read, mask not applied  200 blank
+        //   SGB on, transfers read, mask applied      299 blank
+        //
+        // Applying it costs 99 cartridges on its own. Something about how a
+        // mask is raised or cancelled here is wrong, and until that is found,
+        // a mask that sticks is strictly worse than no mask: the old blanket
+        // 90-frame blank it replaces was at least self-clearing.
+        //
+        // The state is still decoded and kept, because the border work needs
+        // it and because tracking it costs nothing. Only the application is
+        // held back.
+        if !APPLY_SGB_MASK {
+            return;
+        }
+        match self.sgb_mask {
+            1 => {
+                if let Some(f) = &self.sgb_frozen {
+                    self.framebuffer = **f;
+                }
+            }
+            // Black, and colour 0. Colour 0 is whatever the palette's first
+            // entry is, so on a monochrome screen the two look alike; they are
+            // kept apart because an SGB palette can make colour 0 anything.
+            2 => self.framebuffer = [0x0000_0000; SCREEN_W * SCREEN_H],
+            3 => {
+                let c = self.sgb_color_zero();
+                self.framebuffer = [c; SCREEN_W * SCREEN_H];
+            }
+            _ => {}
+        }
+    }
+
+    /// Colour 0 of the active palette, for MASK_EN mode 3.
+    fn sgb_color_zero(&self) -> u32 {
+        self.sgb_palette.map(|p| p.bg[0]).unwrap_or(0x00FF_FFFF)
     }
 
     pub(crate) fn transfer<C: crate::save::Cursor>(&mut self, c: &mut C) {
@@ -591,7 +650,7 @@ impl Ppu {
             }
         }
         self.sgb_palette = if present != 0 { Some(pal) } else { None };
-        c.u8(&mut self.sgb_freeze);
+        c.u8(&mut self.sgb_mask);
         // framebuffer, bg_index, bg_priority, dmg_palette are not part of state:
         // the first is re-rendered, the scratch is per-scanline, and the palette
         // is config restored from the colorize setting.
