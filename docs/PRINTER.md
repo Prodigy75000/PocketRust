@@ -63,6 +63,17 @@ mid-trade is exactly when a silently dead printer toggle would be noticed.
 <save directory>/printer/<CARTRIDGE TITLE> print NNN.png
 ```
 
+**"Save directory" means whatever `RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY`
+RETURNS, which is often not a saves folder.** Frontends alias it freely: on
+Android it is the same path as the system directory, and on the Trophy Hub iOS
+host `set_save_directory` is a documented no-op while `GET_SAVE_DIRECTORY`
+answers with the SYSTEM path. So a printout can land in `system/printer/` on a
+host nobody would describe as putting saves there.
+
+If you are hunting for the files, ask the host what it RETURNS rather than what
+it was set to. Those are different questions, and checking the second one cost
+TH-iOS an hour of watching a directory they had created themselves stay empty.
+
 **The subdirectory is load bearing.** On Android the save directory and the
 system directory are the same path, and that path is the shared support tree for
 every core in the app: BIOS images, Dolphin's `Sys`, PCSX2 resources. User
