@@ -126,6 +126,19 @@ cargo build --release -p gb-libretro
 Build on the OS you are targeting (or with the matching `--target`). No config
 file is needed for host builds.
 
+The core stamps the commit it was built from into its feature string, so you can
+always ask a binary what it is rather than infer it from its timestamp:
+
+```sh
+strings -a gbcore_libretro.dll | grep -o 'build=[A-Za-z0-9.-]*'
+# build=85f6a4ed3-local
+```
+
+`-local` marks a plain `cargo build` rather than a deploy. Checking a feature is
+present is NOT the same check: an option added in one commit is still present in
+every later one, so "it knows about SGB" cannot tell a current build from one
+that is four commits behind. Only the stamp answers that.
+
 ### Android (`.so`)
 
 ```sh

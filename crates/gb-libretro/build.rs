@@ -35,6 +35,14 @@ use std::process::Command;
 fn main() {
     // The one that matters. Set by scripts/deploy-android-debug.sh.
     println!("cargo:rerun-if-env-changed=POCKETRUST_BUILD_ID");
+    // And watch the commit itself, so a plain `cargo build` restamps when HEAD
+    // moves. Without this Cargo happily reuses a cached run and the binary
+    // carries whatever commit was checked out the FIRST time the script ran:
+    // measured 2026-09-22, a build made from 6a2673f identified itself as
+    // c80d7c02a, a commit from a different day. A stamp that names the wrong
+    // commit is worse than no stamp, because the whole point of it is to be the
+    // one thing you can trust about a binary you did not watch being built.
+    watch_git_head();
 
     let id = std::env::var("POCKETRUST_BUILD_ID")
         .ok()
@@ -52,6 +60,42 @@ fn main() {
     let id = if id.is_empty() { "unknown".into() } else { id };
 
     println!("cargo:rustc-env=POCKETRUST_BUILD_ID={id}");
+}
+
+/// Ask Cargo to re-run this script whenever the checked-out commit changes.
+///
+/// `.git/HEAD` alone is not enough: it only changes when the BRANCH changes, so
+/// committing on the branch you are already on would not trigger it. The ref it
+/// points at is the file that moves per commit, so both are watched. A ref that
+/// lives in `packed-refs` rather than as a loose file simply will not be found,
+/// and then this does nothing, which is the same position as before and why
+/// nothing here fails the build.
+fn watch_git_head() {
+    let Some(root) = git_dir() else { return };
+    let head = root.join("HEAD");
+    if !head.exists() {
+        return;
+    }
+    println!("cargo:rerun-if-changed={}", head.display());
+    let Ok(contents) = std::fs::read_to_string(&head) else {
+        return;
+    };
+    if let Some(r) = contents.strip_prefix("ref:").map(str::trim) {
+        let path = root.join(r);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
+
+/// The repository's `.git`, resolved from this crate rather than the cwd, which
+/// during a build script is not guaranteed to be anywhere in particular.
+fn git_dir() -> Option<std::path::PathBuf> {
+    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").ok()?);
+    manifest
+        .ancestors()
+        .map(|a| a.join(".git"))
+        .find(|p| p.is_dir())
 }
 
 /// Best effort for a plain `cargo build`, where nothing exported an identity.
