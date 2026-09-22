@@ -90,6 +90,26 @@ because the libretro core has none and a printed page is not a good enough
 reason to give it one. It uses stored deflate blocks, which PNG permits and
 every decoder accepts.
 
+## If you scale it for sharing, scale it by an integer, with no smoothing
+
+The core writes the lossless original at native size, and any enlarging belongs
+at the point of sharing, from that original. Two rules if you do it.
+
+**Nearest neighbour, never bilinear.** The picture is ordered dither: a
+high-frequency pattern of hard single-pixel transitions that is doing the work
+of tonal shading. Any smoothing filter averages that pattern back into flat
+grey, which destroys precisely the thing that makes it look like a Game Boy
+Camera photograph rather than a small blurry one. On Android this is the
+default-wrong case: an `ImageView` will smooth it unless told not to.
+
+**An integer multiple, or not at all.** 160x144 times four is 640x576, times six
+is 960x864. A non-integer scale gives some source pixels more output pixels than
+others, so a uniform dither pattern comes out visibly uneven and the image reads
+as damaged rather than as enlarged.
+
+Neither rule is a preference. The artifact is pixels, and both of the obvious
+defaults destroy them.
+
 ## One printout, not one print command
 
 **A Pokedex entry is two print commands.** The first ends with a paper feed of
