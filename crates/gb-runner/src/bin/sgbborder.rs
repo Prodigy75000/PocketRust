@@ -1,5 +1,4 @@
-//! Dump the SGB border a cartridge transfers, as a PNG. Diagnostic only:
-//! nothing in the core displays this.
+//! Dump a cartridge's SGB frame, border composed over the screen, as a PNG.
 use gb_core::GameBoy;
 use std::fs::File;
 use std::io::BufWriter;
@@ -19,19 +18,17 @@ fn main() {
         println!("no border transferred in {frames} frames");
         std::process::exit(1);
     };
+    let solid = border.iter().filter(|p| p.is_some()).count();
 
-    // Transparent pixels are where the Game Boy screen shows through. Drawn as
-    // magenta so the hole is obvious rather than looking like black artwork.
+    // The composed 256x224 frame: border art over the live screen, which is
+    // what the display path actually presents. The raw decode above is only
+    // consulted for the count, so that a run still reports how much of the
+    // picture is artwork rather than passthrough.
+    let mut out_px = vec![0u32; 256 * 224];
+    assert!(gb.sgb_compose(&mut out_px), "border decoded but compose declined");
     let mut rgb = Vec::with_capacity(256 * 224 * 3);
-    let mut solid = 0usize;
-    for p in &border {
-        match p {
-            Some(c) => {
-                solid += 1;
-                rgb.extend_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, *c as u8]);
-            }
-            None => rgb.extend_from_slice(&[255, 0, 255]),
-        }
+    for c in &out_px {
+        rgb.extend_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, *c as u8]);
     }
     let w = &mut BufWriter::new(File::create(&out).unwrap());
     let mut enc = png::Encoder::new(w, 256, 224);
@@ -39,7 +36,7 @@ fn main() {
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().unwrap().write_image_data(&rgb).unwrap();
     println!(
-        "wrote {out}: {solid} of {} pixels are border art, the rest is the hole",
+        "wrote {out}: {solid} of {} pixels are border art, the rest is screen or backdrop",
         border.len()
     );
 }

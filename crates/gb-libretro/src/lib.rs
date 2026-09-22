@@ -12,7 +12,9 @@ mod rumble;
 mod sensor;
 mod netpacket;
 
-use gb_core::{Button, Colorize, GameBoy, PrinterHandle, Spool, SCREEN_H, SCREEN_W};
+use gb_core::{
+    Button, Colorize, GameBoy, PrinterHandle, Spool, BORDER_H, BORDER_W, SCREEN_H, SCREEN_W,
+};
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_uint, c_void, CStr, CString};
 use std::ptr;
@@ -77,6 +79,11 @@ const RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: u32 = 10;
 const RETRO_ENVIRONMENT_GET_VARIABLE: u32 = 15;
 const RETRO_ENVIRONMENT_SET_VARIABLES: u32 = 16;
 const RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: u32 = 17;
+/// Renegotiate the frame size without the reinit that SET_SYSTEM_AV_INFO
+/// forces. A Super Game Boy border arrives a second or two into a boot, so the
+/// picture legitimately changes size mid-game and must do so without dropping
+/// the audio stream.
+const RETRO_ENVIRONMENT_SET_GEOMETRY: u32 = 37;
 const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 
 /// A grep-able list of what this build can do.
@@ -194,6 +201,15 @@ struct State {
     gb: Option<GameBoy>,
     rom: Vec<u8>, // kept so retro_reset can rebuild the machine
     frame: Vec<u32>, // XRGB8888, SCREEN_W*SCREEN_H
+    /// The Game Boy picture laid inside an SGB border, BORDER_W*BORDER_H.
+    /// Kept separate from `frame` rather than replacing it, because `frame` is
+    /// the cartridge's own output and anything that reads it wants that and
+    /// not a framed copy.
+    composed: Vec<u32>,
+    /// What geometry the frontend was last told. Only a CHANGE is worth an
+    /// environment call, and this is what makes it a change rather than a
+    /// per-frame renegotiation.
+    bordered: bool,
     /// Set on load; on the next frame we decode the MBC3 RTC out of the SAVE_RAM
     /// buffer the frontend has filled by then (it bypasses `load_sram`).
     restore_rtc: bool,
@@ -223,6 +239,8 @@ impl State {
             gb: None,
             rom: Vec::new(),
             frame: Vec::new(),
+            composed: Vec::new(),
+            bordered: false,
             restore_rtc: false,
             link: LinkDevice::None,
             // On unless a frontend says otherwise. The accessory is a pure
@@ -273,7 +291,10 @@ pub extern "C" fn retro_api_version() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn retro_init() {
-    with_state(|s| s.frame = vec![0u32; SCREEN_W * SCREEN_H]);
+    with_state(|s| {
+        s.frame = vec![0u32; SCREEN_W * SCREEN_H];
+        s.composed = vec![0u32; BORDER_W * BORDER_H];
+    });
     // Ask for a camera once, here rather than per game: the host clears the
     // registration on core unmap and NOT on game unload, so one registration
     // survives a game swap. Asking does not turn a lens on; `camera::start` is
@@ -323,11 +344,15 @@ pub unsafe extern "C" fn retro_get_system_av_info(info: *mut retro_system_av_inf
     if info.is_null() {
         return;
     }
+    // The MAXIMUM is the bordered size, always, even for a cartridge that will
+    // never draw one. A frontend sizes its texture from this once and is
+    // entitled to refuse anything larger later, so understating it here would
+    // make SET_GEOMETRY fail exactly when a border finally arrives.
     (*info).geometry = retro_game_geometry {
         base_width: SCREEN_W as u32,
         base_height: SCREEN_H as u32,
-        max_width: SCREEN_W as u32,
-        max_height: SCREEN_H as u32,
+        max_width: BORDER_W as u32,
+        max_height: BORDER_H as u32,
         aspect_ratio: SCREEN_W as f32 / SCREEN_H as f32,
     };
     (*info).timing = retro_system_timing {
@@ -477,6 +502,60 @@ fn save_directory(s: &State) -> Option<String> {
         .ok()
         .filter(|d| !d.is_empty())
         .map(|d| d.to_string())
+}
+
+/// Hand this frame to the frontend, framed by an SGB border if there is one.
+///
+/// The size is decided per frame rather than at load, because a border arrives
+/// when the cartridge gets round to transferring it: Pokemon Blue is a second
+/// and a half into its boot. So the first frames of an SGB game are genuinely
+/// 160x144 and the later ones are genuinely 256x224, and that transition is
+/// announced with SET_GEOMETRY.
+///
+/// REAL geometry both times, never letterboxed. Bars drawn into the buffer
+/// would become content: they would land in screenshots and force the frontend
+/// to reason about an aspect ratio that is not the picture's. Bars the frontend
+/// draws are layout, and are its business.
+fn present(s: &mut State) {
+    let Some(video) = s.video else { return };
+    let bordered = s
+        .gb
+        .as_ref()
+        .is_some_and(|gb| gb.sgb_compose(&mut s.composed));
+    if bordered != s.bordered {
+        s.bordered = bordered;
+        set_geometry(s, bordered);
+    }
+    let (buf, w, h) = if bordered {
+        (&s.composed, BORDER_W, BORDER_H)
+    } else {
+        (&s.frame, SCREEN_W, SCREEN_H)
+    };
+    unsafe { video(buf.as_ptr() as *const c_void, w as u32, h as u32, w * 4) };
+}
+
+/// Tell the frontend the picture changed size.
+fn set_geometry(s: &State, bordered: bool) {
+    let Some(env) = s.env else { return };
+    let (w, h) = if bordered {
+        (BORDER_W, BORDER_H)
+    } else {
+        (SCREEN_W, SCREEN_H)
+    };
+    let mut g = retro_game_geometry {
+        base_width: w as u32,
+        base_height: h as u32,
+        // max is fixed for the life of the core; see retro_get_system_av_info.
+        max_width: BORDER_W as u32,
+        max_height: BORDER_H as u32,
+        aspect_ratio: w as f32 / h as f32,
+    };
+    unsafe {
+        env(
+            RETRO_ENVIRONMENT_SET_GEOMETRY,
+            &mut g as *mut retro_game_geometry as *mut c_void,
+        )
+    };
 }
 
 /// Put one line on the frontend's screen for about two seconds.
@@ -968,16 +1047,7 @@ pub extern "C" fn retro_run() {
 
         // A print finishes inside a frame, so this is checked after every one.
         drain_printer(s);
-        if let Some(video) = s.video {
-            unsafe {
-                video(
-                    s.frame.as_ptr() as *const c_void,
-                    SCREEN_W as u32,
-                    SCREEN_H as u32,
-                    SCREEN_W * 4,
-                );
-            }
-        }
+        present(s);
 
         // Feed this frame's audio (interleaved stereo i16 @ 44.1 kHz) to the host.
         if let (Some(gb), Some(audio)) = (&mut s.gb, s.audio_batch) {

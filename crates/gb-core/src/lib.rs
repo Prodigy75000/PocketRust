@@ -38,6 +38,9 @@ pub use apu::SAMPLE_RATE;
 pub use colorize::Colorize;
 pub use joypad::Button;
 pub use ppu::{Pixel, SCREEN_H, SCREEN_W};
+/// The SNES screen an SGB border is drawn on. This is the frame size a
+/// bordered cartridge presents, so a frontend needs it to size its texture.
+pub use sgb::{BORDER_H, BORDER_W};
 
 use colorize::DmgPalette;
 
@@ -92,6 +95,43 @@ impl GameBoy {
     /// where it is transparent. Decode only: nothing displays this yet.
     pub fn sgb_border(&self) -> Option<Vec<Option<u32>>> {
         self.mmu.sgb.border()
+    }
+
+    /// Draw this frame inside the cartridge's SGB border, into a 256x224
+    /// buffer, and say whether there was one.
+    ///
+    /// False means present the plain 160x144 screen: either the cartridge is
+    /// not SGB, or it is and has not sent its border yet. The second case is
+    /// normal for the first second or two of a boot, so a caller has to be
+    /// ready for the answer to change from false to true mid-game rather than
+    /// deciding once at load.
+    pub fn sgb_compose(&self, out: &mut [u32]) -> bool {
+        let backdrop = self.mmu.ppu.backdrop();
+        self.mmu.sgb.compose(&self.mmu.ppu.framebuffer, backdrop, out)
+    }
+
+    /// Diagnostic: the raw SGB border tilemap.
+    pub fn sgb_border_map(&self) -> [u16; 32 * 28] {
+        self.mmu.sgb.border_map()
+    }
+
+    /// Diagnostic: the four palettes the border artwork is drawn with.
+    pub fn sgb_border_palettes(&self) -> [[u32; 16]; 4] {
+        self.mmu.sgb.border_palettes()
+    }
+
+    /// The colour an SGB frame shows where there is neither border art nor
+    /// Game Boy screen. See `Ppu::backdrop`.
+    pub fn sgb_backdrop(&self) -> u32 {
+        self.mmu.ppu.backdrop()
+    }
+
+    /// Is a border available to draw right now?
+    ///
+    /// Same answer as `sgb_compose` without doing the work, for a caller that
+    /// needs to size a buffer or renegotiate geometry before compositing.
+    pub fn has_sgb_border(&self) -> bool {
+        self.mmu.sgb.has_border()
     }
 
     /// Diagnostic: the cartridge's current MASK_EN state.

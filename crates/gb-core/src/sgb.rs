@@ -11,6 +11,8 @@
 //! an SGB palette can display it. ATTR_* (per-region palette) and PAL_TRN (VRAM
 //! palette tables) come later; for now the last-set SGB palette 0 is applied.
 
+use crate::{SCREEN_H, SCREEN_W};
+
 /// The Game Boy screen in 8x8 tiles: 20 across, 18 down.
 pub const ATTR_W: usize = 20;
 pub const ATTR_H: usize = 18;
@@ -21,6 +23,11 @@ pub const BORDER_W: usize = 256;
 pub const BORDER_H: usize = 224;
 const BORDER_W_TILES: usize = BORDER_W / 8;
 const BORDER_H_TILES: usize = BORDER_H / 8;
+
+/// Where the Game Boy picture sits on that screen: centred, which works out
+/// exactly even because both differences are.
+pub const BORDER_ORIGIN_X: usize = (BORDER_W - SCREEN_W) / 2;
+pub const BORDER_ORIGIN_Y: usize = (BORDER_H - SCREEN_H) / 2;
 
 /// Expand a 15-bit BGR555 SGB color (little-endian in the packet) to 0x00RRGGBB.
 fn bgr555(lo: u8, hi: u8) -> u32 {
@@ -103,8 +110,10 @@ pub struct Sgb {
     chr_high_half: bool,
     /// The border's tilemap: 32x28 entries of tile number, palette and flips.
     border_map: [u16; BORDER_W_TILES * BORDER_H_TILES],
-    /// Border palettes 4, 5 and 6, sixteen colours each.
-    border_pals: [[u32; 16]; 3],
+    /// Border palettes 4 to 7, sixteen colours each. All FOUR: a tile naming
+    /// the fourth used to be dropped as out of range, which left 9 of Pokemon
+    /// Blue's tiles as holes and punched black rectangles through its border.
+    border_pals: [[u32; 16]; 4],
     /// Has a border been received at all?
     has_border: bool,
 
@@ -136,7 +145,7 @@ impl Sgb {
             border_tiles: Box::new([0; 256 * 32]),
             chr_high_half: false,
             border_map: [0; BORDER_W_TILES * BORDER_H_TILES],
-            border_pals: [[0; 16]; 3],
+            border_pals: [[0; 16]; 4],
             has_border: false,
             sys_palettes: Box::new([[0; 4]; 512]),
             mask: 0,
@@ -171,20 +180,81 @@ impl Sgb {
     /// palette: that is where the Game Boy screen shows through, and it is why
     /// the centre 20x18 tiles are normally blank.
     ///
-    /// Purely a decode. Nothing displays this yet.
+    /// A diagnostic shape. `compose` is what the display path uses, so that a
+    /// frame does not cost a 229 KiB allocation sixty times a second.
     pub fn border(&self) -> Option<Vec<Option<u32>>> {
         if !self.has_border {
             return None;
         }
         let mut out = vec![None; BORDER_W * BORDER_H];
+        self.paint(|px, c| out[px] = Some(c));
+        Some(out)
+    }
+
+    /// Lay the Game Boy screen inside the border, into a 256x224 buffer.
+    ///
+    /// Returns false, having touched nothing, when there is no border to draw;
+    /// the caller should then present the 160x144 screen unchanged rather than
+    /// a framed one.
+    ///
+    /// # Why the screen goes underneath
+    ///
+    /// On the real thing the Game Boy picture is an ordinary SNES background
+    /// layer and the border is another one in front of it, so a transparent
+    /// border pixel reveals whatever is behind at that point. That is not the
+    /// same as "the border has a 160x144 hole cut in it": a cartridge is free
+    /// to draw border art over the centre, and several do for a title screen.
+    /// Compositing in that order gets those right for free, where punching a
+    /// fixed hole would erase them.
+    ///
+    /// Outside the screen there is nothing behind, so `backdrop` shows. That
+    /// is NOT black: see `Ppu::backdrop`.
+    pub fn compose(&self, screen: &[u32], backdrop: u32, out: &mut [u32]) -> bool {
+        if !self.has_border {
+            return false;
+        }
+        debug_assert_eq!(screen.len(), SCREEN_W * SCREEN_H);
+        debug_assert_eq!(out.len(), BORDER_W * BORDER_H);
+        out.fill(backdrop);
+        for y in 0..SCREEN_H {
+            let src = y * SCREEN_W;
+            let dst = (y + BORDER_ORIGIN_Y) * BORDER_W + BORDER_ORIGIN_X;
+            out[dst..dst + SCREEN_W].copy_from_slice(&screen[src..src + SCREEN_W]);
+        }
+        self.paint(|px, c| out[px] = c);
+        true
+    }
+
+    /// Diagnostic: the raw border tilemap, 32x28 entries.
+    pub fn border_map(&self) -> [u16; BORDER_W_TILES * BORDER_H_TILES] {
+        self.border_map
+    }
+
+    /// Diagnostic: the four border palettes, as decoded from PCT_TRN.
+    pub fn border_palettes(&self) -> [[u32; 16]; 4] {
+        self.border_pals
+    }
+
+    /// Is there a border to draw?
+    pub fn has_border(&self) -> bool {
+        self.has_border
+    }
+
+    /// Walk every OPAQUE border pixel, handing the callback its index and
+    /// colour. Transparent pixels are skipped rather than reported, which is
+    /// what lets `compose` simply paint over an already-filled buffer.
+    fn paint(&self, mut emit: impl FnMut(usize, u32)) {
         for ty in 0..BORDER_H_TILES {
             for tx in 0..BORDER_W_TILES {
                 let e = self.border_map[ty * BORDER_W_TILES + tx];
                 let tile = (e & 0xFF) as usize;
                 let pal = ((e >> 10) & 0x07) as usize;
                 let (xflip, yflip) = (e & 0x4000 != 0, e & 0x8000 != 0);
-                // Entries name palettes 4 to 6; anything else is not ours.
-                let Some(pal) = pal.checked_sub(4).filter(|p| *p < 3) else {
+                // Entries name palettes 4 to 7. Lower numbers belong to the
+                // Game Boy picture layer rather than the border, so a tile
+                // asking for one is not ours to draw and stays transparent:
+                // that is what leaves the centre open on most cartridges.
+                let Some(pal) = pal.checked_sub(4).filter(|p| *p < 4) else {
                     continue;
                 };
                 for row in 0..8 {
@@ -205,12 +275,11 @@ impl Sgb {
                             continue; // transparent: the Game Boy shows through
                         }
                         let px = (ty * 8 + row) * BORDER_W + tx * 8 + col;
-                        out[px] = Some(self.border_pals[pal][c as usize]);
+                        emit(px, self.border_pals[pal][c as usize]);
                     }
                 }
             }
         }
-        Some(out)
     }
 
     /// All four visible palettes, for the PPU to index with the map.
@@ -287,11 +356,12 @@ impl Sgb {
         }
         if cmd == 0x14 {
             // PCT_TRN: $000-$6FF is the 32x28 map, two bytes per entry, then
-            // $800-$85F is palettes 4 to 6 at sixteen colours each.
+            // $800-$87F is palettes 4 to 7 at sixteen colours each. That is
+            // four palettes and 128 bytes, not three and 96.
             for i in 0..BORDER_W_TILES * BORDER_H_TILES {
                 self.border_map[i] = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
             }
-            for p in 0..3 {
+            for p in 0..4 {
                 for c in 0..16 {
                     let o = 0x800 + p * 32 + c * 2;
                     self.border_pals[p][c] = bgr555(data[o], data[o + 1]);
@@ -481,10 +551,11 @@ impl Sgb {
                 self.chr_high_half = self.data[1] & 0x01 != 0;
                 self.transfer_pending = Some(0x13);
             }
-            // Every VRAM transfer: PAL_TRN, SOU_TRN, CHR_TRN, PCT_TRN,
-            // ATTR_TRN, OBJ_TRN. The MMU hands the data back through
-            // `consume_transfer`.
-            0x09 | 0x0B | 0x13 | 0x14 | 0x15 | 0x18 => self.transfer_pending = Some(cmd),
+            // Every other VRAM transfer: PAL_TRN, SOU_TRN, PCT_TRN, ATTR_TRN,
+            // OBJ_TRN. The MMU hands the data back through `consume_transfer`.
+            // CHR_TRN ($13) is deliberately absent: the arm above already
+            // claims it, so listing it here again was dead.
+            0x09 | 0x0B | 0x14 | 0x15 | 0x18 => self.transfer_pending = Some(cmd),
             // MASK_EN: freeze, blacken or blank the screen until cancelled.
             //
             // Honouring this used to be unsafe, because a cartridge masks the

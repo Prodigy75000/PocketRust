@@ -251,6 +251,23 @@ impl Ppu {
             self.line_cycles = 0;
             self.window_line = 0;
             self.mode = Mode::HBlank;
+        } else if !was_on && self.lcd_on() {
+            // Switching back on restarts the frame at the TOP of line 0, in OAM
+            // scan. Without this the mode is still the HBlank parked above, so
+            // the PPU waits out the rest of a line it never drew and advances
+            // to line 1: scanline 0 keeps the previous frame's pixels.
+            //
+            // One stale line for one frame is close to invisible in a game, and
+            // that is why it survived. It is not invisible to an SGB VRAM
+            // transfer, which is READ OFF THE SCREEN: a cartridge blanks the
+            // LCD to set the transfer picture up, turns it back on, and the
+            // SNES reads the result. Line 0 of every tile row then carries the
+            // wrong bytes. In Pokemon Blue that punched 20 holes through the
+            // border, as black rectangles across its top rows.
+            self.ly = 0;
+            self.line_cycles = 0;
+            self.window_line = 0;
+            self.mode = Mode::OamScan;
         }
     }
 
@@ -522,6 +539,22 @@ impl Ppu {
             (0x9000i32 + (index as i8 as i32) * 16) as u16
         } else {
             0x8000 + index as u16 * 16
+        }
+    }
+
+    /// The colour behind everything, for the area of an SGB frame that is
+    /// neither border art nor Game Boy screen.
+    ///
+    /// On the SNES that is the backdrop, and the SGB drives it from the Game
+    /// Boy palette rather than leaving it black, so a border with transparent
+    /// gaps blends into the picture instead of showing holes. Pokemon Blue's
+    /// border relies on it: the white in its Pokeballs and its corner medallions
+    /// is not in the artwork at all, it is the backdrop showing through.
+    pub fn backdrop(&self) -> Pixel {
+        if self.cgb {
+            cgb_rgb(&self.bg_pal, 0, 0)
+        } else {
+            self.active_palette().bg[apply_palette(self.bgp, 0) as usize]
         }
     }
 
