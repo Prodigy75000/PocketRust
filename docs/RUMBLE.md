@@ -6,9 +6,10 @@ Racer among them.
 
 ## Where this stands
 
-**Done, and confirmed on hardware.** The mapper, the libretro rumble interface,
-the host's actuator hook and Android's vibrator. The owner played Pokemon
-Pinball on his phone and felt the bumpers.
+**Done, and confirmed on hardware twice.** The mapper, the libretro rumble
+interface and the host's actuator hook, driving Android's vibrator and iOS's
+Taptic Engine. The owner played Pokemon Pinball on a Samsung phone and on an
+iPhone XR and felt the bumpers on both.
 
 ## The bit that is not a bit
 
@@ -44,7 +45,7 @@ and one when it stops, with an explicit zero on unload and on reset.
 
 **Both `STRONG` and `WEAK`, same value.** libretro models a gamepad's two
 motors; the Game Boy has one, so picking either alone would be a guess about
-hardware the core cannot see. **Model it as an amplitude, not a pulse** —
+hardware the core cannot see. **Model it as an amplitude, not a pulse**:
 the pair then arrives as a set and a no-op. Modelled as a pulse it fires twice
 per bumper.
 
@@ -65,8 +66,25 @@ when the cancel lands and the platform's minimum-duration behaviour is never
 consulted. Reaching for a 20 ms one-shot is the obvious first instinct and is
 exactly the case that renders badly.
 
-Confirmed on hardware: bumper hits are felt as distinct hits rather than one
-smeared buzz.
+**Confirmed on two independent actuators**, which matters more than either
+result on its own, because one platform behaving well could always have been
+that platform being forgiving:
+
+| | actuator | API | primitive used |
+|---|---|---|---|
+| Android | Samsung phone vibrator | `VibrationEffect` | long vibration, cancelled on the OFF edge |
+| iOS | iPhone XR Taptic Engine | Core Haptics | `CHHapticAdvancedPatternPlayer` over a long continuous event, `stopAtTime` on the OFF edge |
+
+Both report distinct bumper hits rather than one smeared buzz, and neither
+needed a minimum duration anywhere in the chain. Neither isolates the 17 ms
+shortest case on its own, so that specific claim is still untested; what is now
+well supported is that no minimum is needed at Pinball's real pulse widths.
+
+The start-long-cancel shape generalised without modification. On iOS the obvious
+reach is `UIImpactFeedbackGenerator`, a one-shot whose duration the SYSTEM
+chooses, which is precisely the failure this section warns about. TH-iOS
+reported picking the pattern player instead **because** this was written down,
+which is the entire reason the paragraph exists.
 
 ### Gate on the device, not the cartridge
 
