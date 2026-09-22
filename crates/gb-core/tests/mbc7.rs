@@ -239,3 +239,34 @@ fn a_save_state_restores_the_latched_tilt_rather_than_the_live_one() {
     let x = u16::from(gb.peek(0xA020)) | u16::from(gb.peek(0xA030)) << 8;
     assert_eq!(x, 0x81D0 - 0x70, "the latched tilt must come back with it");
 }
+
+#[test]
+fn a_jerk_is_not_flattened_into_a_tilt() {
+    let Some(rom) = rom() else { return };
+    let mut gb = GameBoy::new(rom);
+    gb.poke(0x0000, 0x0A);
+    gb.poke(0x4000, 0x40);
+
+    let latch = |gb: &mut GameBoy, g: f32| -> u16 {
+        gb.set_tilt(g, 0.0);
+        gb.poke(0xA000, 0x55);
+        gb.poke(0xA010, 0xAA);
+        u16::from(gb.peek(0xA020)) | u16::from(gb.peek(0xA030)) << 8
+    };
+
+    // Kirby's JUMP is the game thresholding raw acceleration, so the whole
+    // tilt-versus-shake discrimination lives in readings ABOVE one g. Anything
+    // that smooths, averages or clamps to a plausible tilt would leave tilting
+    // perfect and silently kill jumping.
+    let one_g = latch(&mut gb, 1.0);
+    let jerk = latch(&mut gb, 3.0);
+    assert!(
+        one_g.abs_diff(0x81D0) >= 0x70,
+        "one g must move the reading by about $70, got {one_g:04X}"
+    );
+    assert!(
+        jerk.abs_diff(0x81D0) > one_g.abs_diff(0x81D0) * 2,
+        "a three-g jerk must read far past one g, not be clamped to it: \
+         one_g {one_g:04X}, jerk {jerk:04X}"
+    );
+}

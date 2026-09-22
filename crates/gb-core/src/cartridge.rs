@@ -381,6 +381,9 @@ impl Accel {
     }
 
     fn latch(&mut self) {
+        // The only bound here is the register's own width. That is a
+        // saturation at the hardware boundary, roughly 292g, and deliberately
+        // NOT a clamp to anything physically plausible: see `set_tilt`.
         let map = |g: f32| -> u16 {
             // Negated, and measured rather than assumed. The register reads
             // BELOW rest as the console tilts toward the positive screen axes:
@@ -1367,6 +1370,14 @@ impl Cartridge {
     /// $55 then $AA, and reads the values latched at that moment. So a frontend
     /// can push as often as it likes without the reading changing under a game
     /// that is midway through reading it.
+    ///
+    /// **Do not filter, smooth, average or clamp these to a plausible tilt.**
+    /// Tilt cannot exceed 1g, a jerk spikes well past it, and that gap is the
+    /// whole tilt-versus-shake discrimination: Kirby's JUMP is the game
+    /// thresholding raw acceleration. A low-pass filter to steady the ball, a
+    /// clamp to +/- 1g, or a two-sample average would each leave tilting
+    /// perfect and silently kill jumping, which is the kind of regression that
+    /// looks like a feature nobody implemented rather than one that broke.
     pub fn set_tilt(&mut self, x_g: f32, y_g: f32) -> bool {
         if let Mbc::Mbc7 { accel, .. } = &mut self.mbc {
             accel.tilt_x = x_g;

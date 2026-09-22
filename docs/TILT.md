@@ -35,6 +35,24 @@ wrong by much in either direction would give a Kirby who never jumps or who
 jumps constantly. Tilt direction alone would not have caught that, because
 direction survives any positive scale factor.
 
+### Do not filter, smooth or clamp the readings
+
+Anywhere in the chain: frontend, host or core. This is the one constraint on
+this feature that is easy to violate while improving something else.
+
+Tilt cannot exceed 1g. A jerk spikes well past it. **That gap is the entire
+tilt-versus-shake discrimination**, because the jump is a raw threshold in the
+game rather than anything either side implements. So a low-pass filter to steady
+a jittery ball, a clamp to a physically plausible range, or even a two-sample
+average would each leave tilting perfect and silently remove jumping.
+
+It would present as a feature nobody implemented rather than one that broke,
+which is why it needs writing down rather than noticing. `latch` saturates only
+at the register's own width, about 292g, and
+`crates/gb-core/tests/mbc7.rs::a_jerk_is_not_flattened_into_a_tilt` fails if
+anyone narrows that to a plausible tilt. TH-Android carries the same note in
+`GbTiltBridge`.
+
 **Touch controls have no fallback, deliberately.** The stick is the fallback and
 the Game Boy overlay has no stick, so on touch, tilt IS the input. Tilt on
 Android is meant to come from the device's own sensor (owner, 2026-09-22), and
