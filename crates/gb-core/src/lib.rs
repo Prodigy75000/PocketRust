@@ -88,6 +88,12 @@ impl GameBoy {
         self.cpu.reg.pc
     }
 
+    /// The SGB border the cartridge transferred, 256x224, `None` per pixel
+    /// where it is transparent. Decode only: nothing displays this yet.
+    pub fn sgb_border(&self) -> Option<Vec<Option<u32>>> {
+        self.mmu.sgb.border()
+    }
+
     /// Diagnostic: the cartridge's current MASK_EN state.
     pub fn sgb_mask(&self) -> u8 {
         self.mmu.sgb.mask()

@@ -16,6 +16,12 @@ pub const ATTR_W: usize = 20;
 pub const ATTR_H: usize = 18;
 const ATTR_TILES: usize = ATTR_W * ATTR_H;
 
+/// The SNES screen an SGB border is drawn on: 256x224, in 8x8 tiles.
+pub const BORDER_W: usize = 256;
+pub const BORDER_H: usize = 224;
+const BORDER_W_TILES: usize = BORDER_W / 8;
+const BORDER_H_TILES: usize = BORDER_H / 8;
+
 /// Expand a 15-bit BGR555 SGB color (little-endian in the packet) to 0x00RRGGBB.
 fn bgr555(lo: u8, hi: u8) -> u32 {
     let v = (lo as u16) | ((hi as u16) << 8);
@@ -90,6 +96,17 @@ pub struct Sgb {
     attr: [u8; ATTR_TILES],
     /// Has the attribute map changed since the PPU last took it?
     attr_dirty: bool,
+    /// The border's tile artwork: 256 tiles of 8x8 at 4 bits per pixel, so 32
+    /// bytes each. CHR_TRN sends half at a time.
+    border_tiles: Box<[u8; 256 * 32]>,
+    /// Which half the next CHR_TRN is for, from its packet's bit 0.
+    chr_high_half: bool,
+    /// The border's tilemap: 32x28 entries of tile number, palette and flips.
+    border_map: [u16; BORDER_W_TILES * BORDER_H_TILES],
+    /// Border palettes 4, 5 and 6, sixteen colours each.
+    border_pals: [[u32; 16]; 3],
+    /// Has a border been received at all?
+    has_border: bool,
 
     /// Debug: (command code, total data bytes) of each completed command.
     pub log: Vec<(u8, usize)>,
@@ -116,6 +133,11 @@ impl Sgb {
             transfer_pending: None,
             attr: [0; ATTR_TILES],
             attr_dirty: false,
+            border_tiles: Box::new([0; 256 * 32]),
+            chr_high_half: false,
+            border_map: [0; BORDER_W_TILES * BORDER_H_TILES],
+            border_pals: [[0; 16]; 3],
+            has_border: false,
             sys_palettes: Box::new([[0; 4]; 512]),
             mask: 0,
             log: Vec::new(),
@@ -141,6 +163,54 @@ impl Sgb {
         }
         self.attr_dirty = false;
         Some(self.attr)
+    }
+
+    /// Draw the border the cartridge sent, as 256x224 pixels.
+    ///
+    /// `None` where the border is transparent, which is colour 0 of any
+    /// palette: that is where the Game Boy screen shows through, and it is why
+    /// the centre 20x18 tiles are normally blank.
+    ///
+    /// Purely a decode. Nothing displays this yet.
+    pub fn border(&self) -> Option<Vec<Option<u32>>> {
+        if !self.has_border {
+            return None;
+        }
+        let mut out = vec![None; BORDER_W * BORDER_H];
+        for ty in 0..BORDER_H_TILES {
+            for tx in 0..BORDER_W_TILES {
+                let e = self.border_map[ty * BORDER_W_TILES + tx];
+                let tile = (e & 0xFF) as usize;
+                let pal = ((e >> 10) & 0x07) as usize;
+                let (xflip, yflip) = (e & 0x4000 != 0, e & 0x8000 != 0);
+                // Entries name palettes 4 to 6; anything else is not ours.
+                let Some(pal) = pal.checked_sub(4).filter(|p| *p < 3) else {
+                    continue;
+                };
+                for row in 0..8 {
+                    let sy = if yflip { 7 - row } else { row };
+                    // 4bpp: planes 0 and 1 interleaved by row for the first
+                    // sixteen bytes, then planes 2 and 3 for the next sixteen.
+                    let b = tile * 32 + sy * 2;
+                    let (p0, p1) = (self.border_tiles[b], self.border_tiles[b + 1]);
+                    let (p2, p3) = (self.border_tiles[b + 16], self.border_tiles[b + 17]);
+                    for col in 0..8 {
+                        let sx = if xflip { 7 - col } else { col };
+                        let bit = 7 - sx;
+                        let c = ((p0 >> bit) & 1)
+                            | (((p1 >> bit) & 1) << 1)
+                            | (((p2 >> bit) & 1) << 2)
+                            | (((p3 >> bit) & 1) << 3);
+                        if c == 0 {
+                            continue; // transparent: the Game Boy shows through
+                        }
+                        let px = (ty * 8 + row) * BORDER_W + tx * 8 + col;
+                        out[px] = Some(self.border_pals[pal][c as usize]);
+                    }
+                }
+            }
+        }
+        Some(out)
     }
 
     /// All four visible palettes, for the PPU to index with the map.
@@ -206,6 +276,28 @@ impl Sgb {
     /// rather than one whose contents go unused.
     pub fn consume_transfer(&mut self, cmd: u8, data: &[u8]) {
         if data.len() < 0x1000 {
+            return;
+        }
+        if cmd == 0x13 {
+            // CHR_TRN: 128 tiles of 32 bytes, into whichever half the packet
+            // asked for.
+            let base = if self.chr_high_half { 128 * 32 } else { 0 };
+            self.border_tiles[base..base + 0x1000].copy_from_slice(&data[..0x1000]);
+            return;
+        }
+        if cmd == 0x14 {
+            // PCT_TRN: $000-$6FF is the 32x28 map, two bytes per entry, then
+            // $800-$85F is palettes 4 to 6 at sixteen colours each.
+            for i in 0..BORDER_W_TILES * BORDER_H_TILES {
+                self.border_map[i] = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
+            }
+            for p in 0..3 {
+                for c in 0..16 {
+                    let o = 0x800 + p * 32 + c * 2;
+                    self.border_pals[p][c] = bgr555(data[o], data[o + 1]);
+                }
+            }
+            self.has_border = true;
             return;
         }
         if cmd == 0x0B {
@@ -383,6 +475,11 @@ impl Sgb {
                     self.palettes[slot] = self.sys_palettes[idx];
                 }
                 self.palette_dirty = true;
+            }
+            // CHR_TRN's packet says which half of the tile set it carries.
+            0x13 => {
+                self.chr_high_half = self.data[1] & 0x01 != 0;
+                self.transfer_pending = Some(0x13);
             }
             // Every VRAM transfer: PAL_TRN, SOU_TRN, CHR_TRN, PCT_TRN,
             // ATTR_TRN, OBJ_TRN. The MMU hands the data back through
