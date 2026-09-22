@@ -29,9 +29,19 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Demo cartridge | ✅ an original, CC0 Game Boy Color cartridge in `roms/pocketrust-demo/`, built by our own assembler and reproducible byte for byte |
 | Memory map | ✅ full descriptor table (work RAM, high RAM, VRAM, OAM, ROM bank 0, cart RAM, CGB banks 2-7) plus the legacy SYSTEM_RAM / SAVE_RAM ids, so achievements, cheats and RAM watch all address the core |
 
-Compatibility: **4577 of 4794** GB / GBC ROMs (95.5%) boot and render in a
-headless smoke test of a large No-Intro-style set. The remaining misses are a
-handful of Hudson (HuC1 / HuC3) and other rare mappers, plus a few edge cases.
+Compatibility: **5190 of 5344** GB / GBC ROMs (97.1%) boot and render, in a
+headless smoke test over the full Game Boy and Game Boy Color SMDB sets. No
+cartridge crashes the loader.
+
+The 154 that do not render are almost entirely unlicensed: 118 unlicensed carts,
+11 prototypes, 8 betas, 4 demos, a test cartridge, and two Pokemon bootlegs.
+**Two licensed retail titles fail**, The Smurfs and Jim Henson's Bear in the Big
+Blue House, both on mappers the core fully supports, so both are emulation bugs
+rather than missing hardware.
+
+A further 32 cartridges use a mapper the core does not implement. Thirty are
+Sachen multicarts, unlicensed carts and copier tools; the two licensed ones are
+Tamagotchi (TAMA5) and Net de Get (MBC6).
 
 ## How it is timed
 
