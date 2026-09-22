@@ -18,7 +18,8 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Game Boy Camera | ✅ mapper, M64282FP sensor model and the libretro camera interface (`docs/CAMERA.md`). Point it at a lens and the cartridge develops a real photograph, with the in-game brightness and contrast sliders doing real work. Edge enhancement and analogue gain are not modelled, so photos are soft but correct |
 | Rumble (MBC5) | ✅ the motor bit, and the RAM bank bit it steals on cart types `$1C-$1E` (`docs/RUMBLE.md`). Driven through the libretro rumble interface on the edge, never per frame. Measured on Pokemon Pinball at 74 motor edges a minute with pulses averaging 48 ms, and confirmed on a phone: bumper hits are felt as distinct hits |
 | Tilt (MBC7) | ✅ two-axis accelerometer and 93LC56 EEPROM save (`docs/TILT.md`). Kirby Tilt 'n' Tumble calibrates, saves and rolls, steered by tilting the device through the libretro sensor interface; confirmed on hardware. Falls back to the left analog stick where no sensor is feeding one |
-| MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm` |
+| MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm`. Pokemon Gold / Silver / Crystal and Harvest Moon |
+| HuC3 clock + IR | ✅ a separate clock in HuC3's own format (minutes since midnight, days) behind its command mailbox, persisted in the `.srm` under its own magic. The IR port answers "no signal", so software polling it gets a quiet line rather than a reply that never comes. Robopon and Pocket Family boot |
 | Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and GameLink sessions over the libretro netpacket interface (`pocketrust-link-4`) |

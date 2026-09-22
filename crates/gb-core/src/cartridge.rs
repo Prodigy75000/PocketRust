@@ -17,6 +17,15 @@ pub struct Header {
     /// MBC3 carts with the on-board timer chip (cart types 0x0F / 0x10) carry a
     /// real-time clock. Only these expose the RTC registers.
     pub has_rtc: bool,
+    /// Cartridges whose clock must survive a power cycle in the battery save.
+    ///
+    /// NOT the same question as `has_rtc`, which means "is this an MBC3 with the
+    /// timer chip". HuC3 has a clock too, in a completely different format
+    /// (minutes and days rather than seconds/minutes/hours), and it is just as
+    /// battery-backed. Conflating the two left Robopon's clock ticking
+    /// correctly, surviving a save state, and resetting to zero every time the
+    /// player quit and came back.
+    pub has_clock_footer: bool,
     /// MBC5 carts with a rumble motor (cart types 0x1C / 0x1D / 0x1E). On these
     /// bit 3 of the RAM bank register drives the motor instead of the RAM chip,
     /// so the same write means different things on two MBC5 cartridges and the
@@ -114,6 +123,8 @@ impl Header {
         // stops being an address line, so the same write means different things
         // on two cartridges with the same mapper.
         let has_rumble = matches!(cart_type, 0x1C | 0x1D | 0x1E);
+        // MBC3's timer chip, plus HuC3, which carries its own clock.
+        let has_clock_footer = matches!(cart_type, 0x0F | 0x10 | 0xFE);
 
         // ROM size: 32 KiB << N gives the total size, i.e. 2 << N banks of 16 KiB.
         let rom_banks = 2usize << rom[0x0148];
@@ -136,6 +147,7 @@ impl Header {
             ram_banks,
             has_battery,
             has_rtc,
+            has_clock_footer,
             has_rumble,
             cgb_flag: rom[0x0143],
             sgb_flag: rom[0x0146],
@@ -705,6 +717,8 @@ const CYCLES_PER_SECOND: u32 = 4_194_304;
 /// Layout: b"PRTC" + version + S + M + H + days(u16 LE) + flags + sub(u32 LE).
 const RTC_FOOTER_LEN: usize = 15;
 const RTC_FOOTER_MAGIC: &[u8; 4] = b"PRTC";
+/// HuC3's clock footer. Same length, different magic: see `Huc3::encode_footer`.
+const HUC3_FOOTER_MAGIC: &[u8; 4] = b"PHU3";
 
 /// The MBC3 real-time clock.
 ///
@@ -925,16 +939,23 @@ impl Huc3 {
         }
     }
 
-    fn tick(&mut self, cycles: u32) {
+    /// Returns true when a minute rolled over, so the caller can refresh the
+    /// battery footer. Once a minute rather than every tick: the footer only
+    /// changes when the displayed time does, and rewriting it four million
+    /// times a second to store the same value would be absurd.
+    fn tick(&mut self, cycles: u32) -> bool {
         self.sub += cycles;
+        let mut rolled = false;
         while self.sub >= CYCLES_PER_MINUTE {
             self.sub -= CYCLES_PER_MINUTE;
+            rolled = true;
             self.minutes += 1;
             if self.minutes >= 1440 {
                 self.minutes = 0;
                 self.days = (self.days + 1) & 0x0FFF;
             }
         }
+        rolled
     }
 
     /// Read the MCU register at `addr` (scratch 0x00-0x07 or the live clock
@@ -1020,6 +1041,36 @@ impl Huc3 {
         }
     }
 
+    /// Encode the live time into the battery footer.
+    ///
+    /// Same length as MBC3's so the offset arithmetic is shared, but a
+    /// different magic: a footer written by one clock must never be read back
+    /// as the other, and the two carry completely different fields.
+    fn encode_footer(&self) -> [u8; RTC_FOOTER_LEN] {
+        let mut f = [0u8; RTC_FOOTER_LEN];
+        f[0..4].copy_from_slice(HUC3_FOOTER_MAGIC);
+        f[4] = 1; // version
+        f[5..7].copy_from_slice(&self.minutes.to_le_bytes());
+        f[7..9].copy_from_slice(&self.days.to_le_bytes());
+        f[9..13].copy_from_slice(&self.sub.to_le_bytes());
+        f
+    }
+
+    /// Restore from a battery footer, if one is present and valid. An older
+    /// .srm has no footer and simply keeps the power-on clock, which is the
+    /// behaviour this replaces rather than a regression.
+    fn decode_footer(&mut self, f: &[u8]) {
+        if f.len() < RTC_FOOTER_LEN || &f[0..4] != HUC3_FOOTER_MAGIC || f[4] != 1 {
+            return;
+        }
+        // Clamped to the hardware's ranges, because a save file is input: a
+        // corrupted day count must not put the clock somewhere the cartridge
+        // can never read back.
+        self.minutes = u16::from_le_bytes([f[5], f[6]]).min(1439);
+        self.days = u16::from_le_bytes([f[7], f[8]]) & 0x0FFF;
+        self.sub = u32::from_le_bytes([f[9], f[10], f[11], f[12]]) % CYCLES_PER_MINUTE;
+    }
+
     fn transfer<C: crate::save::Cursor>(&mut self, c: &mut C) {
         c.u8(&mut self.mode);
         c.u8(&mut self.command);
@@ -1063,7 +1114,11 @@ impl Cartridge {
         } else {
             // RTC carts append a footer past the game-visible RAM so the clock
             // rides along in the battery save. The MBC never maps into it.
-            let footer = if header.has_rtc { RTC_FOOTER_LEN } else { 0 };
+            let footer = if header.has_clock_footer {
+                RTC_FOOTER_LEN
+            } else {
+                0
+            };
             vec![0u8; header.ram_banks.max(1) * 0x2000 + footer]
         };
         let mbc = match header.mbc_kind {
@@ -1952,8 +2007,11 @@ impl Cartridge {
                 }
             }
             Mbc::Huc3 { huc3, .. } => {
-                huc3.tick(cycles);
-                None
+                if huc3.tick(cycles) {
+                    Some(huc3.encode_footer())
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -1978,7 +2036,7 @@ impl Cartridge {
     /// After the frontend loads a battery `.srm`, pull the RTC time back out of
     /// its footer (if the save carried one). Call once, right after `load_sram`.
     pub fn restore_rtc_from_footer(&mut self) {
-        if !self.header.has_rtc {
+        if !self.header.has_clock_footer {
             return;
         }
         let off = self.rtc_footer_offset();
@@ -1988,11 +2046,12 @@ impl Cartridge {
         let footer: [u8; RTC_FOOTER_LEN] = self.ram[off..off + RTC_FOOTER_LEN]
             .try_into()
             .expect("slice is RTC_FOOTER_LEN");
-        if let Mbc::Mbc3 {
-            has_rtc: true, rtc, ..
-        } = &mut self.mbc
-        {
-            rtc.decode_footer(&footer);
+        match &mut self.mbc {
+            Mbc::Mbc3 {
+                has_rtc: true, rtc, ..
+            } => rtc.decode_footer(&footer),
+            Mbc::Huc3 { huc3, .. } => huc3.decode_footer(&footer),
+            _ => {}
         }
     }
 
