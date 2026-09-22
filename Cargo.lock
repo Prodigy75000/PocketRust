@@ -207,18 +207,18 @@ version = "0.1.0"
 
 [[package]]
 name = "gb-core"
-version = "0.2.3"
+version = "0.3.0"
 
 [[package]]
 name = "gb-libretro"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "gb-core",
 ]
 
 [[package]]
 name = "gb-runner"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "gb-core",
  "minifb",
