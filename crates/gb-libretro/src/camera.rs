@@ -193,8 +193,18 @@ unsafe extern "C" fn on_deinitialized() {
 /// Convert an XRGB8888 frame to the sensor's greyscale and latch it.
 ///
 /// `pitch` is in **bytes**, not pixels. Treating it as pixels quarters the
-/// stride and shears the picture into a diagonal, which on this cartridge is
-/// indistinguishable from the core's own no-frames diagnostic.
+/// stride and shears the picture into diagonal streaks.
+///
+/// That is worth naming precisely, because the obvious reading of it is
+/// backwards. A shear resembles the `no_camera_card`, which is the one with a
+/// diagonal in it, and that card means "this frontend has no camera interface".
+/// So a pitch bug in the FRAME path presents as a diagnostic pointing at the
+/// REGISTRATION path, sending the reader to the wrong half of the system.
+///
+/// If you are looking at diagonals: check this conversion before concluding the
+/// interface never came up. (Found by TH-LibretroHost, who spotted that their
+/// own comment and mine both had it the wrong way round once there were two
+/// cards to confuse.)
 unsafe extern "C" fn on_raw_frame(buffer: *const u32, width: c_uint, height: c_uint, pitch: usize) {
     if buffer.is_null() || width == 0 || height == 0 {
         return;

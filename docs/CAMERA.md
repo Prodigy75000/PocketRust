@@ -120,6 +120,27 @@ callback would re-enter an open state borrow. That is undefined behaviour
 dressed up as a camera bug. So the callback converts and latches, one slot with
 newest winning, and `retro_run` applies.
 
+### Which picture means what
+
+The shared debugging contract across the three repositories. Get this the wrong
+way round and you look in the wrong half of the system.
+
+| What you see | What it means | Where to look |
+|---|---|---|
+| Hard-edged bars and a diagonal | the env call returned false, so there is **no camera interface** | missing or stale host source |
+| Concentric rings | the interface is up and the lens is open, but **no frame has arrived** | the frontend's pump, or a permission the player has not granted |
+| A real but sheared picture | frames ARE arriving; the **pitch** is being read as pixels rather than bytes | the frame conversion, not the registration |
+| Nothing at all, app will not build | `env_camera.cpp` missing from the frontend's build | that is a link error, and it is loud |
+
+The third row is the trap, and it is subtle enough that two of us wrote the
+comment backwards. A pitch shear produces diagonal streaks, which resemble the
+card that means "no camera interface", so the symptom points at registration
+while the bug is in the frame path. Diagonals are not evidence that the
+interface failed.
+
+The first row is likewise NOT what a missing frontend pump looks like. A missing
+pump leaves the interface up and the frames undelivered, which is rings.
+
 **The core wants light, not pictures.** A greyscale frame, 128 by 112, and
 nothing else. Exposure, gain, edge enhancement and dithering all happen here,
 from the registers the game writes, which is precisely what makes the in-game
