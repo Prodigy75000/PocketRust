@@ -156,11 +156,53 @@ host bring-up for one a player can hit in a dark room, which is permanent,
 user-facing, and needs opposite responses again. There is a test that fails if
 it goes.
 
-**The core wants light, not pictures.** A greyscale frame, 128 by 112, and
-nothing else. Exposure, gain, edge enhancement and dithering all happen here,
-from the registers the game writes, which is precisely what makes the in-game
-brightness and contrast sliders do something real. Pre-converting to Game Boy
-shades outside the core would make those controls meaningless.
+**The core wants light, not pictures.** A greyscale frame, and nothing else.
+Exposure, gain, edge enhancement and dithering all happen here, from the
+registers the game writes, which is precisely what makes the in-game brightness
+and contrast sliders do something real. Pre-converting to Game Boy shades
+outside the core would make those controls meaningless, and so would an
+auto-levels pass: it fights the exposure register and the sliders go dead.
+
+**The pushed frame does NOT have to be 128x112.** The host expands greyscale to
+XRGB8888 and passes width and height through; the core resamples nearest
+neighbour. Push whatever the capture session gives you.
+
+The crop is a different question and it IS the embedder's job, for a product
+reason rather than a technical one: the crop has to match what the player is
+aiming with, or the viewfinder lies about what the photo will contain. Because
+the resample does not correct aspect, a frame whose aspect is not 8:7 comes out
+SQUASHED rather than cropped, so crop to 8:7 and then stop.
+
+One inconsistency to know about: `GameBoy::set_camera_frame`, the Rust API the
+runner tools use, does demand exactly 128x112 and returns false otherwise. That
+is not the path a frontend is on. TH-iOS asked this exact question, which is
+what showed the sentence above used to imply otherwise.
+
+### A fourth state: authorised but not yet granted
+
+The three rows above assume the answer arrives promptly. On iOS it may not: the
+permission prompt is asynchronous, so the first frames after a start can
+legitimately never arrive while the player decides. The rings then sit on screen
+for several seconds through nobody's fault. (TH-iOS, who could see this because
+Android's permission model hides it from the core.)
+
+**It simply waits.** No timeout, no fault, no error path. `cam.frame` stays
+None, the rings render every frame, and the cartridge is reading a valid picture
+the whole time.
+
+One real consequence: **the card is a genuine image to the cartridge.** A player
+who presses the shutter while the rings are up develops and saves a photograph
+of the concentric rings. That is deliberate, it exercises the whole
+trigger-to-tiles path, and it is not worth suppressing, but it means a ring
+photo can legitimately end up in somebody's album.
+
+A denial and a prompt still pending are **indistinguishable to the core**, and
+both look like a capture that never started. Nothing tells it which, so if a
+frontend wants to say "you denied the camera" it has to say so itself. Do NOT
+route that through `th_retro_camera_set_present(0)`: the host forbids it,
+because a denial is revocable from system settings and a zero there entitles the
+core to stop asking permanently, breaking the one case that has to work, which
+is the player granting permission and coming back.
 
 ### Aiming a selfie feels reversed, and that is correct
 
