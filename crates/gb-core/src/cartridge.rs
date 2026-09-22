@@ -180,6 +180,14 @@ struct Cam {
     /// black. `None` means nothing is feeding us light, and captures develop a
     /// self-describing test card instead. See `camera_develop`.
     frame: Option<Vec<u8>>,
+    /// Does the frontend have a camera at all?
+    ///
+    /// This tells apart two failures that otherwise look identical: a
+    /// frontend that never implemented the camera interface, and one whose
+    /// camera has not produced a frame yet or was refused permission. Both
+    /// leave `frame` as `None`, and without this the player and the developer
+    /// see the same picture for a bug and for a prompt.
+    sensor_available: bool,
 }
 
 /// How long a capture is reported as busy.
@@ -206,10 +214,21 @@ pub const CAMERA_H: usize = 112;
 /// picture is wrong and the cause is in somebody else's repository. So the
 /// no-signal image is deliberately unmistakable rather than plausible.
 ///
-/// Four vertical bars stepping through the four shades, cut by a diagonal.
-/// Nothing a lens could produce, so nobody mistakes it for a photograph, and it
-/// still exercises every shade and the whole dither matrix.
-fn test_card(x: usize, y: usize) -> u8 {
+/// There are TWO of these on purpose. A frontend with no camera interface and
+/// a frontend whose camera has not produced a frame yet both leave the core
+/// with nothing, and those need completely different responses: one is a bug
+/// to file against the frontend, the other is a permission prompt to put in
+/// front of the player. One image for both means whoever sees it cannot tell
+/// which they are looking at, which defeats the point of a diagnostic.
+///
+/// `no_camera_card` is four hard-edged vertical bars cut by a diagonal.
+/// `waiting_for_light_card` is concentric rings: ROUND rather than straight,
+/// so the two are distinguishable at a glance and in a blurry photograph of a
+/// screen, which is how these are usually reported.
+///
+/// Both are deliberately unmistakable rather than plausible, and both exercise
+/// all four shades and the whole dither matrix.
+fn no_camera_card(x: usize, y: usize) -> u8 {
     let bar = (x * 4 / CAMERA_W).min(3);
     let level = [30u8, 100, 170, 240][bar];
     if (x + y) % 32 < 3 {
@@ -219,6 +238,13 @@ fn test_card(x: usize, y: usize) -> u8 {
     }
 }
 
+fn waiting_for_light_card(x: usize, y: usize) -> u8 {
+    let dx = x as i32 - CAMERA_W as i32 / 2;
+    let dy = y as i32 - CAMERA_H as i32 / 2;
+    let r = ((dx * dx + dy * dy) as f64).sqrt() as usize;
+    [240u8, 170, 100, 30][(r / 9) % 4]
+}
+
 impl Cam {
     fn new() -> Cam {
         Cam {
@@ -226,6 +252,7 @@ impl Cam {
             regs: [0; 0x35],
             busy: 0,
             frame: None,
+            sensor_available: false,
         }
     }
 
@@ -979,9 +1006,10 @@ impl Cartridge {
         let mut shades = vec![0u8; CAMERA_W * CAMERA_H];
         for y in 0..CAMERA_H {
             for x in 0..CAMERA_W {
-                let raw = match &cam.frame {
-                    Some(f) => f[y * CAMERA_W + x],
-                    None => test_card(x, y),
+                let raw = match (&cam.frame, cam.sensor_available) {
+                    (Some(f), _) => f[y * CAMERA_W + x],
+                    (None, true) => waiting_for_light_card(x, y),
+                    (None, false) => no_camera_card(x, y),
                 } as u32;
                 let lit = (raw * gain / NOMINAL_EXPOSURE).min(255) as u8;
 
@@ -1044,6 +1072,19 @@ impl Cartridge {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Tell the core whether the frontend has a camera at all.
+    ///
+    /// Call it with true once a camera interface has been obtained, whether or
+    /// not a frame has arrived. It only chooses which diagnostic the sensor sees
+    /// while no frame is available, and it is worth setting because "this
+    /// frontend cannot do cameras" and "no picture has arrived yet" want
+    /// different responses from whoever is looking at the screen.
+    pub fn set_camera_available(&mut self, available: bool) {
+        if let Mbc::Camera { cam, .. } = &mut self.mbc {
+            cam.sensor_available = available;
         }
     }
 

@@ -7,6 +7,7 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 
+mod camera;
 mod netpacket;
 
 use gb_core::{Button, Colorize, GameBoy, PrinterHandle, Spool, SCREEN_H, SCREEN_W};
@@ -16,7 +17,7 @@ use std::ptr;
 
 // --- libretro C types we need -------------------------------------------------
 
-type retro_environment_t = Option<unsafe extern "C" fn(u32, *mut c_void) -> bool>;
+pub(crate) type retro_environment_t = Option<unsafe extern "C" fn(u32, *mut c_void) -> bool>;
 type retro_video_refresh_t = Option<unsafe extern "C" fn(*const c_void, u32, u32, usize)>;
 type retro_audio_sample_batch_t = Option<unsafe extern "C" fn(*const i16, usize) -> usize>;
 type retro_input_poll_t = Option<unsafe extern "C" fn()>;
@@ -239,6 +240,25 @@ pub extern "C" fn retro_api_version() -> u32 {
 #[no_mangle]
 pub extern "C" fn retro_init() {
     with_state(|s| s.frame = vec![0u32; SCREEN_W * SCREEN_H]);
+    // Ask for a camera once, here rather than per game: the host clears the
+    // registration on core unmap and NOT on game unload, so one registration
+    // survives a game swap. Asking does not turn a lens on; `camera::start` is
+    // what does that, and it is only ever called for a cartridge with a sensor.
+    let env = with_state(|s| s.env);
+    if camera::register(env) {
+        log_camera_state();
+    }
+}
+
+/// Tell the core whether a camera exists, so it can pick the right diagnostic
+/// while no frame has arrived. "This frontend cannot do cameras" and "no
+/// picture yet" want different responses from whoever is looking at the screen.
+fn log_camera_state() {
+    with_state(|s| {
+        if let Some(gb) = &mut s.gb {
+            gb.set_camera_available(camera::available());
+        }
+    });
 }
 
 #[no_mangle]
@@ -610,6 +630,19 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
             }
         }
     });
+
+    // Only now, and only for a cartridge that actually has a sensor. A frontend
+    // must never be made to raise a camera permission prompt because somebody
+    // loaded Pokemon.
+    let wants_camera = with_state(|s| s.gb.as_ref().is_some_and(|gb| gb.has_camera()));
+    if wants_camera {
+        camera::start();
+    }
+    with_state(|s| {
+        if let Some(gb) = &mut s.gb {
+            gb.set_camera_available(camera::available());
+        }
+    });
     true
 }
 
@@ -675,6 +708,9 @@ fn reconcile_netlink() {
 
 #[no_mangle]
 pub extern "C" fn retro_unload_game() {
+    // Put the lens away. Leaving a camera running for a game that is no longer
+    // loaded is the kind of bug a user is right to be angry about.
+    camera::stop();
     with_state(|s| {
         // Anything the spool is holding for a continuation that will now never
         // come. Writing it late beats losing it.
@@ -716,6 +752,16 @@ pub extern "C" fn retro_run() {
     }
 
     with_state(|s| {
+        // Apply whatever the camera latched since the last frame. Done here, and
+        // not in the callback, because a frontend may pump frames from its own
+        // loop either side of ours and re-entering an open state borrow would be
+        // undefined behaviour dressed up as a camera bug.
+        if let Some(gb) = &mut s.gb {
+            if let Some(frame) = camera::take_frame() {
+                gb.set_camera_frame(&frame);
+            }
+        }
+
         // First frame after a load: the frontend has now filled SAVE_RAM, so pull
         // the MBC3 real-time clock back out of its battery footer.
         if s.restore_rtc {
@@ -935,6 +981,10 @@ mod map_tests {
         // descriptors and took the app down with it.
         assert_eq!(RETRO_ENVIRONMENT_SET_MESSAGE, 6);
         assert_eq!(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, 31);
+        // The camera interface DOES carry the experimental bit, unlike the two
+        // above. Sending bare 26 would be a different command entirely.
+        assert_eq!(camera::RETRO_ENVIRONMENT_GET_CAMERA_INTERFACE, 0x1_001A);
+        assert_ne!(camera::RETRO_ENVIRONMENT_GET_CAMERA_INTERFACE, 26);
         assert_ne!(RETRO_ENVIRONMENT_SET_MESSAGE, RETRO_ENVIRONMENT_GET_VARIABLE);
 
         assert_eq!(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, 0x1_0024);

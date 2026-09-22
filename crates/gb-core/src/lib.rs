@@ -171,6 +171,15 @@ impl GameBoy {
         self.mmu.cartridge.has_camera()
     }
 
+    /// Tell the core whether the frontend has a camera at all.
+    ///
+    /// Only chooses which diagnostic the sensor shows while no frame has
+    /// arrived. "This frontend cannot do cameras" is a bug to file; "no picture
+    /// yet" is a permission prompt to surface; they must not look the same.
+    pub fn set_camera_available(&mut self, available: bool) {
+        self.mmu.cartridge.set_camera_available(available)
+    }
+
     /// Point the Game Boy Camera at something.
     ///
     /// `gray` is `CAMERA_W * CAMERA_H` bytes, one per pixel, 0 black,
