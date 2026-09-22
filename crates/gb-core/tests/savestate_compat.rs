@@ -74,3 +74,33 @@ fn the_accessories_added_since_did_not_move_anything() {
         .expect("the v0.2.3 state fixture is committed");
     assert_eq!(old.len(), 58005);
 }
+
+#[test]
+fn an_mbc5_state_from_v0_2_3_still_loads_and_is_unchanged() {
+    // The demo-cart fixture above is a ROM-only cartridge, so it exercises no
+    // mapper at all and could not have caught a change to one. That gap was
+    // real: MBC5 gained a rumble field afterwards, and nothing in this file
+    // would have noticed if it had moved a byte.
+    //
+    // MBC5 specifically, because it is the mapper behind Pokemon Yellow. The
+    // cartridge here is synthetic and licence-free: a save state carries the
+    // game's RAM, so one made from a commercial ROM is a derived copyrighted
+    // work and cannot be committed.
+    let rom = std::fs::read(repo("crates/gb-core/tests/fixtures/mbc5-cart.gb"))
+        .expect("the synthetic MBC5 cartridge is committed");
+    assert_eq!(rom[0x0147], 0x1B, "MBC5 + RAM + BATTERY, as Pokemon Yellow is");
+
+    let old = std::fs::read(repo("crates/gb-core/tests/fixtures/mbc5-cart-v0.2.3.state"))
+        .expect("the v0.2.3 MBC5 state fixture is committed");
+
+    let mut gb = GameBoy::new(rom);
+    assert!(
+        gb.load_state(&old),
+        "this build refuses an MBC5 save state written by v0.2.3"
+    );
+    assert_eq!(
+        gb.save_state(),
+        old,
+        "the MBC5 save-state byte layout has changed since v0.2.3"
+    );
+}
