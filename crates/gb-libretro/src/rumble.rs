@@ -30,9 +30,18 @@
 //! branch they take when the interface is missing entirely.
 //!
 //! So false is expected and must not be treated as an error to retry or give up
-//! over. It is worth saying out loud once, though, because "my phone is not
-//! buzzing" otherwise has two indistinguishable causes: a core that never asked
-//! and a frontend that cannot deliver.
+//! over. It is simply dropped. This module used to put a line on screen the
+//! first time a motor was asked for and nothing took it, because "my phone is
+//! not buzzing" has two indistinguishable causes: a core that never asked and a
+//! frontend that cannot deliver. **The owner removed it on 2026-09-22**, having
+//! looked for it and judged it unnecessary: "I didn't ask for a message, I
+//! guess it's good user UX but it's not needed."
+//!
+//! Worth knowing before reinstating it: Android never renders SET_MESSAGE at
+//! all. The host logs it and nothing draws it, so on that client every such
+//! notice was only ever a logcat line. A core that needs to tell an Android
+//! player something has to draw into the FRAMEBUFFER, which is what the camera
+//! diagnostics do.
 
 use std::cell::UnsafeCell;
 use std::ffi::{c_uint, c_void};
@@ -62,12 +71,6 @@ struct Shared {
     available: bool,
     /// What the motor was doing last frame, so only edges are sent.
     last: bool,
-    /// Has the frontend ever accepted a state change? A property of the
-    /// DEVICE, so it outlives any one cartridge.
-    accepted: bool,
-    /// Has the "it cannot actually buzz" note been handed out? Also a property
-    /// of the device, and deliberately not reset per game: see `stop`.
-    announced: bool,
 }
 
 struct Global(UnsafeCell<Shared>);
@@ -83,8 +86,6 @@ static SHARED: Global = Global(UnsafeCell::new(Shared {
     },
     available: false,
     last: false,
-    accepted: false,
-    announced: false,
 }));
 
 fn shared() -> &'static mut Shared {
@@ -123,12 +124,11 @@ pub fn set(on: bool) {
         return;
     };
     let strength = if on { FULL } else { 0 };
-    // Both effects, same value. See the module comment.
-    let a = unsafe { f(0, RETRO_RUMBLE_STRONG, strength) };
-    let b = unsafe { f(0, RETRO_RUMBLE_WEAK, strength) };
-    if a || b {
-        s.accepted = true;
-    }
+    // Both effects, same value. See the module comment. The return values say
+    // whether the frontend could do it, and are dropped: there is nothing to
+    // retry and nothing left to report.
+    unsafe { f(0, RETRO_RUMBLE_STRONG, strength) };
+    unsafe { f(0, RETRO_RUMBLE_WEAK, strength) };
 }
 
 /// Stop the motor and forget the edge.
@@ -146,65 +146,12 @@ pub fn stop() {
             unsafe { f(0, RETRO_RUMBLE_WEAK, 0) };
         }
     }
-    // Only the edge. `accepted` and `announced` describe the DEVICE, which does
-    // not change when a cartridge does, so clearing them here would re-ask and
-    // re-announce on every load.
-    //
-    // That is not hypothetical. The owner's smoke tablet, an SM-X400, reports
-    // "No vibrator found" and does not carry the vibrator feature at all, so
-    // for it the answer is false permanently. Resetting per load would put
-    // "this device cannot rumble" on screen every single time Pokemon Pinball
-    // is opened, forever, which turns one useful explanation into a nag.
     s.last = false;
-}
-
-/// Say once, and only once, that nothing took the motor.
-///
-/// The caller's wording must not name a cause. A refusal cannot distinguish a
-/// device with no vibrator from a frontend that never wired one up, and the
-/// second is a bug somebody would want reported rather than explained away.
-///
-/// Returns true the first time the motor has been asked to run and nothing
-/// accepted it. Deliberately keyed on a real attempt rather than on
-/// registration: plenty of frontends hand back an interface, and the only
-/// evidence that it does anything is a call that was taken.
-pub fn unavailable_notice() -> bool {
-    let s = shared();
-    if !should_announce(s.announced, s.last, s.accepted) {
-        return false;
-    }
-    s.announced = true;
-    true
-}
-
-/// The rule, separated from the global so it can be tested.
-///
-/// Announce only when the motor has genuinely been asked to run and nothing
-/// took it, and only ever once. The "asked to run" half is what keeps a player
-/// who never reaches a rumbling moment from being told about a limitation they
-/// have not hit.
-fn should_announce(announced: bool, motor_wanted: bool, accepted: bool) -> bool {
-    !announced && motor_wanted && !accepted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_notice_waits_for_a_real_attempt_and_then_fires_once() {
-        // Nothing has asked for the motor yet: saying anything here would be
-        // telling a player about a limit they have not reached.
-        assert!(!should_announce(false, false, false));
-        // Asked, and nothing took it. This is the one case worth a message.
-        assert!(should_announce(false, true, false));
-        // Already said. Repeating it on every cartridge load turns a useful
-        // explanation into a nag, and on a device with no vibrator at all it
-        // would repeat forever.
-        assert!(!should_announce(true, true, false));
-        // The frontend can actually buzz, so there is nothing to explain.
-        assert!(!should_announce(false, true, true));
-    }
 
     #[test]
     fn the_environment_id_has_no_experimental_bit() {
