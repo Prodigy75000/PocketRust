@@ -2,13 +2,22 @@
 
 **This core:** PocketRust already ships save-states (validated vs Gambatte).
 **Audit the existing `retro_serialize` against the rules below** before it's
-relied on for cross-platform netplay; bump `format_version` if a fix changes the
-byte layout. FamiRust's `save.rs` byte-cursor is the reference implementation.
+relied on for moving a state between devices; bump `format_version` if a fix
+changes the byte layout. FamiRust's `save.rs` byte-cursor is the reference
+implementation.
 
 Trophy Hub's in-house cores must produce save-states that transfer across
-platforms (iOS ↔ Android ↔ Desktop) for cross-engine netplay. The durable way is
-**not** matching build binaries — it's making serialize output identical *by
-construction*.
+platforms (iOS ↔ Android ↔ Desktop). The durable way is **not** matching build
+binaries — it's making serialize output identical *by construction*.
+
+**Note for this core specifically: the Game Boy has no netplay.** The rules
+below are fleet-wide and other in-house cores do use them for netplay, so the
+word appears in sibling copies of this document; do not let it drift back in
+here. PocketRust's two-player feature is a **GameLink session**, which is a link
+cable and exchanges serial bytes rather than machine state. The reasons these
+rules matter here are a player carrying a save-state between their own devices,
+and anything that keys on `retro_serialize_size`. See the GameLink section of
+the README.
 
 **The invariant:** `retro_serialize` output is a pure function of emulator
 **state**, identical byte-for-byte on every target triple and build config.
@@ -25,7 +34,7 @@ construction*.
 6. Deterministic emulator (no wall-clock / host-seeded RNG / float nondeterminism
    leaking into state).
 7. `retro_serialize_size()` stable + equal across platforms per `format_version`
-   (the netplay handshake keys on it — keep `format_version` honest).
+   (a session handshake keys on it — keep `format_version` honest).
 
 **Required test — the golden-bytes test:** build a known state, serialize, assert
 the **exact** byte string. Target-independence makes those bytes identical
