@@ -148,6 +148,20 @@ interface failed.
 The first row is likewise NOT what a missing frontend pump looks like. A missing
 pump leaves the interface up and the frames undelivered, which is rings.
 
+**Both cards are REAL IMAGES to the cartridge, and that is the non-obvious
+half.** They are not an overlay the core draws on top of a photograph; they are
+what the sensor reads when nothing else is feeding it light, so they go through
+exposure, dither and tiles like any other picture. A player who presses the
+shutter while the rings are up **develops and saves a photograph of the
+concentric rings**, into the album, permanently.
+
+That is correct behaviour all the way down and it reads as a bug to the person
+holding the phone. It has happened to a real player. It is deliberate, because a
+card that could not be photographed would not exercise the path it exists to
+test, and it is not worth suppressing, but a frontend that shows a card for long
+enough to be photographed should expect the photograph. (TH-iOS, who hit it
+during a permission prompt.)
+
 **The diagonal in the first card is load-bearing; do not tidy it away.** Without
 it that card is four flat shade bars, which is a gradient, and a gradient is
 close to what a legitimate but very low-contrast capture looks like on a
@@ -189,12 +203,6 @@ Android's permission model hides it from the core.)
 **It simply waits.** No timeout, no fault, no error path. `cam.frame` stays
 None, the rings render every frame, and the cartridge is reading a valid picture
 the whole time.
-
-One real consequence: **the card is a genuine image to the cartridge.** A player
-who presses the shutter while the rings are up develops and saves a photograph
-of the concentric rings. That is deliberate, it exercises the whole
-trigger-to-tiles path, and it is not worth suppressing, but it means a ring
-photo can legitimately end up in somebody's album.
 
 A denial and a prompt still pending are **indistinguishable to the core**, and
 both look like a capture that never started. Nothing tells it which, so if a

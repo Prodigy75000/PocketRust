@@ -41,9 +41,25 @@ read the reply at the trailer, not at the magic. Verified by printing a Pokedex
 entry with it in place.
 
 **A live GameLink session outranks it.** If one is up, the cable is a person and
-the printer setting is ignored until that session ends. A front end that offers
-both as toggles should disable or explain the printer one while a session is
-live, rather than leaving a control that silently does nothing.
+the printer setting is ignored until that session ends.
+
+Stated as a rule for any client: **if a link session can be live, the printer is
+silently dead, and the frontend is the only thing that can say so.** The core
+cannot. From inside, a printer request during a session is not an error, it is a
+setting that does not apply, so there is nothing to report and nothing to fail.
+
+This used to say that a front end offering both as toggles should disable or
+explain the printer one. That was correct and it quietly excluded the client
+that needed it most. **It assumes a printer toggle exists.** On iOS the printer
+is invisible and always on, which is the better design, so there was no control
+to annotate, and the advice could not fire even for someone who had read it that
+same evening, because they were not looking for a control they do not have.
+
+What it costs when nobody says it: the owner had LAN on from earlier testing,
+every print failed instantly with "Printer Error 2" and no transfer bar, and the
+core, the cartridge and the file path were all fine. That is an evening. A
+client with no toggle still owes the player a sentence, in whatever surface it
+has.
 
 GameLink and netplay are **not** synonyms here, and the difference decides
 whether that paragraph applies to you. Netplay means deterministic input
@@ -56,6 +72,13 @@ shipped cross-device trading on it.
 
 So this is a real conflict a user can reach, not a defensive branch. Two people
 mid-trade is exactly when a silently dead printer toggle would be noticed.
+
+**Make it escapable before you make it legible.** TH-iOS found their in-game
+"Turn off LAN" ended the session but left the switch on, so it re-armed on the
+next ROM and the player could not recover through any control they offered.
+Being stuck is worse than being confused: explaining the conflict needs a live
+session AND a printer-capable cartridge AND a print attempt, which is rare,
+while an unrecoverable state is permanent for whoever hits it.
 
 ## Where the files go
 
