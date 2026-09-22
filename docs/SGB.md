@@ -93,13 +93,34 @@ printer and camera paths read that buffer, so a screenshot would carry them, and
 "native" aspect would be constrained to the wrong ratio. Bars the frontend draws
 are layout and are the frontend's business.
 
-## What is decoded but not applied
+## The mask, and how it is really cancelled
 
-`MASK_EN` freezes, blackens or blanks the screen until cancelled. It is decoded
-and deliberately not applied, behind `APPLY_SGB_MASK` in `ppu.rs`. Applying it
-cost 99 cartridges when it was last measured. That measurement was taken on a
-larger ROM set than the one currently on disk, so it needs redoing before the
-flag is flipped.
+`MASK_EN` ($17) freezes, blackens or blanks the screen until cancelled, and it
+exists because a transfer draws garbage on the display. A cartridge raises it,
+transfers, and then lifts it.
+
+The lift almost never comes as `MASK_EN 0`. It arrives as **bit 6 of a flags
+byte in another command**: byte 9 of `PAL_SET`, or byte 1 of `ATTR_SET`. Pan
+Docs, on `PAL_SET`: "If this bit is set, then any current MASK_EN screen freeze
+is cancelled." Decoding only `MASK_EN` means waiting for a cancel that never
+arrives, and the screen stays masked forever. That is exactly what happened:
+applying the mask used to cost 99 cartridges, and Wario Land II, Tetris Blast,
+Tetris Plus, Bomberman GB and Madden 96 were all games that raise a mask once
+and never send `MASK_EN 0`.
+
+With the cancel decoded the mask is applied unconditionally and costs nothing.
+Measured over `dumps/roms`, 549 cartridges, 7 blank either way and the same
+seven titles.
+
+**A frame that ends without reaching line 144 still has to be masked.** The PPU
+stops dead while the LCD is off, `step_frame` gives up on its cycle budget, and
+the partly drawn frame is presented anyway. Applying the mask from the line-144
+path alone left those frames unmasked, which is two frames of visible garbage in
+Pokemon Blue's boot. It is applied at the end of `step_frame` instead.
+
+Scored by counting horizontal colour changes per frame, which is a good proxy
+for a transfer picture, Pokemon Blue's first 300 frames went from **14 frames
+over 3000 edges to none**.
 
 ## Tools
 
@@ -109,6 +130,9 @@ cargo run -p gb-runner --bin sgbborder -- "<rom>" out.png 2600
 
 # Border palettes, tilemap palette histogram, and any holes in the artwork.
 cargo run -p gb-runner --bin palprobe -- "<rom>"
+
+# The cartridge's whole SGB command sequence, in order.
+CMDLOG=1 cargo run -p gb-runner --bin palprobe -- "<rom>"
 
 # The whole library, with and without SGB, to price the option.
 SGB=1 cargo run -p gb-runner --release --bin smoke -- dumps/roms

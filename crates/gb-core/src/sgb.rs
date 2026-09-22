@@ -545,6 +545,36 @@ impl Sgb {
                     self.palettes[slot] = self.sys_palettes[idx];
                 }
                 self.palette_dirty = true;
+                // Byte 9 is a flags byte and bit 6 cancels MASK_EN. Pan Docs:
+                // "If this bit is set, then any current MASK_EN screen freeze
+                // is cancelled."
+                //
+                // This is how the mask actually gets lifted, and missing it is
+                // why applying MASK_EN used to blank games. A cartridge raises
+                // the mask to hide the garbage its own VRAM transfer draws on
+                // screen, does the transfers, and then cancels the mask as a
+                // side effect of the PAL_SET that finishes the job. It never
+                // sends MASK_EN 0, so waiting for one waits forever: Wario
+                // Land II, Tetris Blast, Tetris Plus, Bomberman GB and Madden
+                // 96 all mask once and never cancel explicitly.
+                //
+                // Bit 7 selects an attribute file from ATTR_TRN's data, which
+                // is not implemented; bits 0-5 name which one. Ignoring those
+                // costs per-tile attributes on cartridges that use them and
+                // nothing else.
+                if self.data[9] & 0x40 != 0 {
+                    self.mask = 0;
+                }
+            }
+            // ATTR_SET: same cancel bit, byte 1 this time. Pan Docs: "When
+            // above Bit 6 is set, the Game Boy screen becomes re-enabled after
+            // the transfer (in case it has been disabled/frozen by MASK_EN)."
+            // The attribute-file selection in bits 0-5 is not implemented, for
+            // the same reason as PAL_SET's bit 7 above.
+            0x16 => {
+                if self.data[1] & 0x40 != 0 {
+                    self.mask = 0;
+                }
             }
             // CHR_TRN's packet says which half of the tile set it carries.
             0x13 => {
@@ -691,6 +721,65 @@ mod tests {
             send(&mut sgb, &pkt);
             assert_eq!(sgb.mask(), mode);
         }
+    }
+
+    /// How the mask is actually lifted in practice.
+    ///
+    /// Almost no cartridge sends MASK_EN 0. It raises the mask to hide the
+    /// garbage its own VRAM transfer draws on screen, then clears it as a side
+    /// effect of the PAL_SET or ATTR_SET that finishes the job, through bit 6
+    /// of a flags byte. Decoding only MASK_EN means waiting for a cancel that
+    /// never arrives, which left Wario Land II, Tetris Blast, Tetris Plus,
+    /// Bomberman GB and Madden 96 masked forever and was the whole reason the
+    /// mask was not applied at all.
+    #[test]
+    fn pal_set_and_attr_set_cancel_the_mask_through_bit_6() {
+        // PAL_SET: the flags byte is byte 9.
+        for (flags, want) in [(0x00u8, 1u8), (0x40, 0)] {
+            let mut sgb = Sgb::new(0x03);
+            let mut mask = [0u8; 16];
+            mask[0] = (0x17 << 3) | 1;
+            mask[1] = 1;
+            send(&mut sgb, &mask);
+            assert_eq!(sgb.mask(), 1, "the mask must be up before it can be cancelled");
+
+            let mut pkt = [0u8; 16];
+            pkt[0] = (0x0A << 3) | 1;
+            pkt[9] = flags;
+            send(&mut sgb, &pkt);
+            assert_eq!(sgb.mask(), want, "PAL_SET flags {flags:#04X}");
+        }
+
+        // ATTR_SET: the same bit, byte 1 this time, not byte 9. Using the
+        // wrong offset for either command reads an unrelated field, which for
+        // PAL_SET is half of a system palette number.
+        for (flags, want) in [(0x00u8, 1u8), (0x40, 0)] {
+            let mut sgb = Sgb::new(0x03);
+            let mut mask = [0u8; 16];
+            mask[0] = (0x17 << 3) | 1;
+            mask[1] = 1;
+            send(&mut sgb, &mask);
+
+            let mut pkt = [0u8; 16];
+            pkt[0] = (0x16 << 3) | 1;
+            pkt[1] = flags;
+            send(&mut sgb, &pkt);
+            assert_eq!(sgb.mask(), want, "ATTR_SET flags {flags:#04X}");
+        }
+
+        // And bit 6 specifically. Bits 0-5 name an attribute file and bit 7
+        // asks for it to be used; neither cancels anything, so a sloppy test
+        // against a whole byte would pass on code that cancelled on any flag.
+        let mut sgb = Sgb::new(0x03);
+        let mut mask = [0u8; 16];
+        mask[0] = (0x17 << 3) | 1;
+        mask[1] = 1;
+        send(&mut sgb, &mask);
+        let mut pkt = [0u8; 16];
+        pkt[0] = (0x0A << 3) | 1;
+        pkt[9] = 0xBF; // every bit but 6
+        send(&mut sgb, &pkt);
+        assert_eq!(sgb.mask(), 1, "only bit 6 cancels");
     }
 
     #[test]

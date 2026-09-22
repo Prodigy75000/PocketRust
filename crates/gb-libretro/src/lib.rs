@@ -219,6 +219,12 @@ struct State {
     /// environment call, and this is what makes it a change rather than a
     /// per-frame renegotiation.
     bordered: bool,
+    /// Whether the player asked for Super Game Boy, kept because the option is
+    /// read at LOAD and a reset builds a whole new machine. `refresh_variables`
+    /// cannot carry it: re-reading a load-time option on reset is the same bug
+    /// as reading it live, since the frontend's value may have changed since
+    /// the cartridge was started and the cartridge has no way to be told.
+    sgb_wanted: bool,
     /// Set on load; on the next frame we decode the MBC3 RTC out of the SAVE_RAM
     /// buffer the frontend has filled by then (it bypasses `load_sram`).
     restore_rtc: bool,
@@ -250,6 +256,7 @@ impl State {
             frame: Vec::new(),
             composed: Vec::new(),
             bordered: false,
+            sgb_wanted: false,
             restore_rtc: false,
             link: LinkDevice::None,
             // On unless a frontend says otherwise. The accessory is a pure
@@ -746,6 +753,17 @@ pub extern "C" fn retro_reset() {
         }
         s.gb = Some(gb);
         refresh_variables(s); // re-apply the colorize option
+        // And Super Game Boy, which refresh_variables deliberately does not
+        // touch because it is a LOAD-time option. The new machine starts with
+        // it off, so without this a reset silently dropped the border and the
+        // only way back was to quit the game and start it again.
+        if let Some(gb) = &mut s.gb {
+            gb.set_sgb(s.sgb_wanted);
+        }
+        // The rebuilt machine has sent no transfers yet, so there is no border
+        // to draw. Saying so now means `present` announces the size change back
+        // to 160x144 on the next frame, and again when a border returns.
+        s.bordered = false;
         // A reset rebuilds the cartridge, so the ROM and save-RAM allocations
         // move and their descriptors would otherwise point at freed memory.
         publish_memory_map(s);
@@ -806,6 +824,7 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     // way to switch it off. TH-Android hit exactly that on their side.
     let sgb = with_state(|s| read_option(s, OPT_SGB, "off")) == "on";
     with_state(|s| {
+        s.sgb_wanted = sgb;
         if let Some(gb) = &mut s.gb {
             gb.set_sgb(sgb);
         }

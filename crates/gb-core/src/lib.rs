@@ -192,6 +192,10 @@ impl GameBoy {
                 self.mmu.ppu.set_sgb_palette(pal);
             }
         }
+        // However this frame ended, mask it now. Reaching line 144 and running
+        // out of cycle budget both produce a frame to show, and only the first
+        // of them used to be masked: see `Ppu::apply_sgb_mask`.
+        self.mmu.ppu.apply_sgb_mask();
         &self.mmu.ppu.framebuffer
     }
 

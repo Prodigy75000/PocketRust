@@ -114,11 +114,6 @@ pub struct Ppu {
     stat_line: bool,
 }
 
-/// Whether MASK_EN is applied to the displayed frame. See `apply_sgb_mask`
-/// for the measurement behind this being false: applying it costs 99
-/// cartridges across the full set. Flip once that is understood.
-const APPLY_SGB_MASK: bool = false;
-
 impl Ppu {
     pub fn new(cgb: bool) -> Ppu {
         Ppu {
@@ -320,7 +315,6 @@ impl Ppu {
             self.vblank_interrupt = true;
             self.frame_ready = true;
             self.capture_sgb_frame();
-            self.apply_sgb_mask();
         } else if self.ly > 153 {
             self.ly = 0;
             self.window_line = 0;
@@ -691,26 +685,31 @@ impl Ppu {
     }
 
     /// Apply the cartridge's screen mask to the just-finished frame.
-    fn apply_sgb_mask(&mut self) {
-        // The mask is TRACKED but not yet APPLIED, and that is a measurement
-        // rather than caution. Full set, 5344 cartridges, one variable at a
-        // time:
+    ///
+    /// Called when a frame ENDS rather than when line 144 is reached, and the
+    /// difference matters. A frame can finish without the PPU ever getting to
+    /// line 144: a cartridge blanks the LCD to set its transfer picture up, the
+    /// PPU stops dead while it is off, and `step_frame` gives up on its cycle
+    /// budget. Applied from `advance_line` those frames were never masked at
+    /// all, and each one showed a partly drawn transfer as garbage. Two of
+    /// Pokemon Blue's boot frames did exactly that.
+    pub(crate) fn apply_sgb_mask(&mut self) {
+        // This used to be held back behind a flag, because applying the mask
+        // cost 99 cartridges that rendered only with it off. The reason was
+        // that the CANCEL was never being seen: a cartridge lifts the mask
+        // through bit 6 of PAL_SET's flags byte or ATTR_SET's, not by sending
+        // MASK_EN 0, and neither was decoded. Waiting for a MASK_EN 0 that
+        // never comes leaves the screen masked forever. Wario Land II, Tetris
+        // Blast, Tetris Plus, Bomberman GB and Madden 96 all did that.
         //
-        //   SGB off, as shipped                       148 blank
-        //   SGB on, transfers read, mask not applied  200 blank
-        //   SGB on, transfers read, mask applied      299 blank
+        // With the cancel decoded, measured over dumps/roms (549 cartridges):
         //
-        // Applying it costs 99 cartridges on its own. Something about how a
-        // mask is raised or cancelled here is wrong, and until that is found,
-        // a mask that sticks is strictly worse than no mask: the old blanket
-        // 90-frame blank it replaces was at least self-clearing.
+        //   SGB on, mask not applied   7 blank
+        //   SGB on, mask applied       7 blank, and the same seven titles
         //
-        // The state is still decoded and kept, because the border work needs
-        // it and because tracking it costs nothing. Only the application is
-        // held back.
-        if !APPLY_SGB_MASK {
-            return;
-        }
+        // It now costs nothing and removes every frame of transfer garbage
+        // from a boot: Pokemon Blue went from 14 noisy frames in its first 300
+        // to none.
         match self.sgb_mask {
             1 => {
                 if let Some(f) = &self.sgb_frozen {
