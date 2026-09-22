@@ -47,14 +47,20 @@ PKG=com.trophyhub.android
 
 # Which device. An explicit serial wins; otherwise there must be exactly one.
 serial="${1:-}"
-mapfile -t attached < <(adb devices | awk 'NR>1 && $2=="device"{print $1}')
+# TAB separated, not whitespace separated. A wireless serial can contain a
+# SPACE: a phone reconnecting over mDNS comes back as
+# "adb-RFCY10A9ELF-24gVL7 (2)._adb-tls-connect._tcp", and splitting on
+# whitespace put "(2)._adb-tls-connect._tcp" in the state column, so the list
+# came back EMPTY and the script reported no devices while one was plainly
+# attached.
+mapfile -t attached < <(adb devices | awk -F'	' 'NR>1 && $2=="device"{print $1}')
 if [ -n "$serial" ]; then
     found=0
     for d in "${attached[@]}"; do [ "$d" = "$serial" ] && found=1; done
     if [ "$found" -eq 0 ]; then
         echo "No attached device with serial '$serial'. Attached:"
         for d in "${attached[@]}"; do
-            echo "  $d  $(adb -s "$d" shell getprop ro.product.model 2>/dev/null | tr -d '')"
+            echo "  $d  $(adb -s "$d" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
         done
         exit 1
     fi
@@ -66,12 +72,15 @@ elif [ "${#attached[@]}" -eq 0 ]; then
 else
     echo "More than one device attached. Name the one you want:"
     for d in "${attached[@]}"; do
-        echo "  scripts/install-android-debug.sh $d   # $(adb -s "$d" shell getprop ro.product.model 2>/dev/null | tr -d '')"
+        echo "  scripts/install-android-debug.sh '$d'   # $(adb -s "$d" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
     done
     exit 1
 fi
-adb="adb -s $serial"
-echo "Target device: $serial ($($adb shell getprop ro.product.model 2>/dev/null | tr -d ''))"
+# A FUNCTION, not a string. "adb -s $serial" word-splits on the space a
+# reconnected mDNS serial can contain, so adb got two arguments and read the
+# second as a command. Seen as: adb-RFCY10A9ELF-24gVL7 (2)._adb-tls-connect._tcp
+adb_dev() { adb -s "$serial" "$@"; }
+echo "Target device: $serial ($(adb_dev shell getprop ro.product.model 2>/dev/null | tr -d '\r'))"
 
 stamp_of() {
     # The build= token out of POCKETRUST_FEATURES. Survives stripping, which is
@@ -109,18 +118,18 @@ fi
 APK="$APP_DIR/app/build/outputs/apk/debug/app-debug.apk"
 echo
 echo "Installing $APK"
-$adb install -r "$APK"
+adb_dev install -r "$APK"
 
 echo
 echo "Checking the DEVICE is running that build:"
-dev_path="$($adb shell pm path "$PKG" | tr -d '\r' | sed -n 's/^package://p' | head -1)"
+dev_path="$(adb_dev shell pm path "$PKG" | tr -d '\r' | sed -n 's/^package://p' | head -1)"
 if [ -z "$dev_path" ]; then
     echo "  could not find $PKG on the device"
     exit 1
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-$adb pull -a "$dev_path" "$tmp/base.apk" >/dev/null 2>&1
+adb_dev pull -a "$dev_path" "$tmp/base.apk" >/dev/null 2>&1
 unzip -o -q "$tmp/base.apk" "lib/arm64-v8a/libgbcore_libretro.so" -d "$tmp"
 got="$(stamp_of "$tmp/lib/arm64-v8a/libgbcore_libretro.so")"
 
