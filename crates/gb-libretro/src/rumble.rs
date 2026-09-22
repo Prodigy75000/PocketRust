@@ -158,7 +158,11 @@ pub fn stop() {
     s.last = false;
 }
 
-/// Say once, and only once, that the frontend cannot actually buzz.
+/// Say once, and only once, that nothing took the motor.
+///
+/// The caller's wording must not name a cause. A refusal cannot distinguish a
+/// device with no vibrator from a frontend that never wired one up, and the
+/// second is a bug somebody would want reported rather than explained away.
 ///
 /// Returns true the first time the motor has been asked to run and nothing
 /// accepted it. Deliberately keyed on a real attempt rather than on

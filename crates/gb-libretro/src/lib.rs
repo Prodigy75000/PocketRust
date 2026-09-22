@@ -904,7 +904,11 @@ pub extern "C" fn retro_run() {
         if s.gb.as_ref().is_some_and(|gb| gb.has_rumble()) {
             rumble::set(s.gb.as_ref().is_some_and(|gb| gb.rumble()));
             if rumble::unavailable_notice() {
-                notify(s, "This cartridge rumbles, but this device cannot");
+                // Parallel phrasing, and deliberately vague about WHY. A
+                // refusal cannot tell "this device has no vibrator" from
+                // "this frontend never wired one up", so naming either would
+                // be inventing a cause. "Has none" is true of both.
+                notify(s, "Rumble: this cartridge has a motor, this device has none");
             }
         }
 
