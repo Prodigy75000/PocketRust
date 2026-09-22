@@ -4,7 +4,12 @@
 # Build the app with this core in it, install it, and prove the device is
 # running the binary you just built.
 #
-#   scripts/install-android-debug.sh
+#   scripts/install-android-debug.sh [device-serial]
+#
+# With more than one device attached, adb refuses every command that has to
+# pick one and the failure arrives several minutes in, after the app has
+# already been built. So the serial is resolved and checked FIRST, and passed
+# explicitly to every adb call below rather than left to adb's default.
 #
 # `deploy-android-debug.sh` stops when the .so is in jniLibs, deliberately:
 # building the app is the Android agent's business. This script is the rest of
@@ -39,6 +44,34 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$root/../TrophyHubAndroid"
 JNI_SO="$APP_DIR/app/src/main/jniLibs/arm64-v8a/libgbcore_libretro.so"
 PKG=com.trophyhub.android
+
+# Which device. An explicit serial wins; otherwise there must be exactly one.
+serial="${1:-}"
+mapfile -t attached < <(adb devices | awk 'NR>1 && $2=="device"{print $1}')
+if [ -n "$serial" ]; then
+    found=0
+    for d in "${attached[@]}"; do [ "$d" = "$serial" ] && found=1; done
+    if [ "$found" -eq 0 ]; then
+        echo "No attached device with serial '$serial'. Attached:"
+        for d in "${attached[@]}"; do
+            echo "  $d  $(adb -s "$d" shell getprop ro.product.model 2>/dev/null | tr -d '')"
+        done
+        exit 1
+    fi
+elif [ "${#attached[@]}" -eq 1 ]; then
+    serial="${attached[0]}"
+elif [ "${#attached[@]}" -eq 0 ]; then
+    echo "No device attached."
+    exit 1
+else
+    echo "More than one device attached. Name the one you want:"
+    for d in "${attached[@]}"; do
+        echo "  scripts/install-android-debug.sh $d   # $(adb -s "$d" shell getprop ro.product.model 2>/dev/null | tr -d '')"
+    done
+    exit 1
+fi
+adb="adb -s $serial"
+echo "Target device: $serial ($($adb shell getprop ro.product.model 2>/dev/null | tr -d ''))"
 
 stamp_of() {
     # The build= token out of POCKETRUST_FEATURES. Survives stripping, which is
@@ -76,18 +109,18 @@ fi
 APK="$APP_DIR/app/build/outputs/apk/debug/app-debug.apk"
 echo
 echo "Installing $APK"
-adb install -r "$APK"
+$adb install -r "$APK"
 
 echo
 echo "Checking the DEVICE is running that build:"
-dev_path="$(adb shell pm path "$PKG" | tr -d '\r' | sed -n 's/^package://p' | head -1)"
+dev_path="$($adb shell pm path "$PKG" | tr -d '\r' | sed -n 's/^package://p' | head -1)"
 if [ -z "$dev_path" ]; then
     echo "  could not find $PKG on the device"
     exit 1
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-adb pull -a "$dev_path" "$tmp/base.apk" >/dev/null 2>&1
+$adb pull -a "$dev_path" "$tmp/base.apk" >/dev/null 2>&1
 unzip -o -q "$tmp/base.apk" "lib/arm64-v8a/libgbcore_libretro.so" -d "$tmp"
 got="$(stamp_of "$tmp/lib/arm64-v8a/libgbcore_libretro.so")"
 
