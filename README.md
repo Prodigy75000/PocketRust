@@ -17,16 +17,16 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | Cartridges | ✅ no-MBC, MBC1, MBC2, MBC3 (+ RTC), MBC5, MBC7, HuC1, HuC3 (+ RTC); battery-backed save RAM |
 | Game Boy Camera | ✅ mapper, M64282FP sensor model and the libretro camera interface (`docs/CAMERA.md`). Point it at a lens and the cartridge develops a real photograph, with the in-game brightness and contrast sliders doing real work. Edge enhancement and analogue gain are not modelled, so photos are soft but correct |
 | Rumble (MBC5) | ✅ the motor bit, and the RAM bank bit it steals on cart types `$1C-$1E` (`docs/RUMBLE.md`). Driven through the libretro rumble interface on the edge, never per frame. Measured on Pokemon Pinball at 74 motor edges a minute with pulses averaging 48 ms, and confirmed on two independent actuators, an Android vibrator and an iPhone Taptic Engine: bumper hits are felt as distinct hits rather than one smeared buzz |
-| Tilt (MBC7) | ✅ two-axis accelerometer and 93LC56 EEPROM save (`docs/TILT.md`). Kirby Tilt 'n' Tumble calibrates, saves and rolls, steered by tilting the device through the libretro sensor interface; confirmed on hardware. Falls back to the left analog stick where no sensor is feeding one |
+| Tilt (MBC7) | ✅ two-axis accelerometer and 93LC56 EEPROM save (`docs/TILT.md`). Kirby Tilt 'n' Tumble calibrates, saves and rolls, steered by tilting the device through the libretro sensor interface; confirmed on hardware |
 | MBC3 RTC | ✅ real-time clock (latch, halt, day carry); deterministic, cycle-driven; persists in save state and `.srm`. Pokemon Gold / Silver / Crystal and Harvest Moon |
 | HuC3 clock + IR | ✅ a separate clock in HuC3's own format (minutes since midnight, days) behind its command mailbox, persisted in the `.srm` under its own magic. The IR port answers "no signal", so software polling it gets a quiet line rather than a reply that never comes. Robopon and Pocket Family boot |
 | Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
-| Super Game Boy | ✅ command decoding over the joypad lines, VRAM transfers read off the rendered frame, palettes, per-tile attributes, and the **decorative border** composed into a 256x224 frame (`docs/SGB.md`). Opt-in via `pocketrust_sgb`, off by default and read at load only. Sound commands and SNES-side uploaded programs are not implemented |
+| Super Game Boy | ✅ command decoding over the joypad lines, VRAM transfers read off the rendered frame, palettes, per-tile attributes, and the **decorative border** composed into a 256x224 frame (`docs/SGB.md`). Opt-in via `pocketrust_sgb`, off by default and read at load only |
 | Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and GameLink sessions over the libretro netpacket interface (`pocketrust-link-4`) |
 | Game Boy Printer | ✅ full packet protocol on the link port, including RLE; pages joined on the printer's own margins and written as PNG (`docs/PRINTER.md`). Verified against Pokemon Yellow printing a Pokedex entry |
 | GameLink transport | ✅ sequenced paired exchange, sub-frame polling, retransmit; byte-perfect through 1-in-3 packet loss |
-| Demo cartridge | ✅ an original, CC0 Game Boy Color cartridge in `roms/pocketrust-demo/`, built by our own assembler and reproducible byte for byte |
+| Demo cartridge | ✅ an original, CC0 Game Boy Color cartridge in `roms/pocketrust-demo/`, assembled by the SM83 assembler in this repo, reproducible byte for byte |
 | Memory map | ✅ full descriptor table (work RAM, high RAM, VRAM, OAM, ROM bank 0, cart RAM, CGB banks 2-7) plus the legacy SYSTEM_RAM / SAVE_RAM ids, so achievements, cheats and RAM watch all address the core |
 
 Compatibility: **5190 of 5344** GB / GBC ROMs (97.1%) boot and render, in a
@@ -107,9 +107,9 @@ cargo run --release -p gb-runner --bin smoke -- path/to/roms/
 ## libretro core
 
 `gb-libretro` is a standard libretro core (the full `retro_*` C ABI). It builds a
-single `cdylib` (one crate, one source of truth) that every Trophy Hub client
-loads by `dlopen` + `dlsym`: Android, desktop (Windows/macOS/Linux) and iOS. The
-output is named for the libretro convention (`gbcore_libretro`), so the file is:
+single `cdylib` (one crate, one source of truth), loaded by `dlopen` + `dlsym`
+on Android, desktop (Windows/macOS/Linux) and iOS. The output is named for the
+libretro convention (`gbcore_libretro`), so the file is:
 
 | Platform | Target triple | Output file |
 |----------|---------------|-------------|
@@ -136,18 +136,12 @@ cargo build --release -p gb-libretro
 Build on the OS you are targeting (or with the matching `--target`). No config
 file is needed for host builds.
 
-The core stamps the commit it was built from into its feature string, so you can
-always ask a binary what it is rather than infer it from its timestamp:
+The core stamps the commit it was built from into its feature string:
 
 ```sh
 strings -a gbcore_libretro.dll | grep -o 'build=[A-Za-z0-9.-]*'
 # build=85f6a4ed3-local
 ```
-
-`-local` marks a plain `cargo build` rather than a deploy. Checking a feature is
-present is NOT the same check: an option added in one commit is still present in
-every later one, so "it knows about SGB" cannot tell a current build from one
-that is four commits behind. Only the stamp answers that.
 
 ### Android (`.so`)
 
@@ -167,9 +161,8 @@ the Play Store requires for uploads targeting API 35+. Drop the resulting
 
 ### iOS (`.dylib`, embedded in a co-signed `.framework`)
 
-The iOS host `dlopen`s each core from an embedded, co-signed framework (dlsym
-loader, the same path Gambatte takes), so the core is a plain `cdylib`; no
-`staticlib` and no code change are needed.
+An iOS host that `dlopen`s cores from an embedded, co-signed framework needs a
+plain `cdylib`; no `staticlib` and no code change are required.
 
 ```sh
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
@@ -182,8 +175,8 @@ cargo build --release -p gb-libretro --target aarch64-apple-ios-sim
 ```
 
 Then wrap the `.dylib` in a `.framework`, set its install name, and co-sign it
-before embedding, exactly as the existing Gambatte core is packaged. Build on
-macOS with the Xcode command-line tools installed (provides the iOS linker).
+before embedding. Build on macOS with the Xcode command-line tools installed,
+which provide the iOS linker.
 
 ## GameLink (link cable over the network)
 
@@ -194,16 +187,7 @@ session** it gives the core a `send`/`receive` pair, which the core bridges
 straight to the Game Boy serial engine using the same 2-byte protocol as the
 local/TCP transports.
 
-GameLink is a **link cable**, not netplay, and the distinction is not cosmetic:
-nothing here synchronises machine state, rolls back, or arbitrates a shared
-clock. Two independent Game Boys run their own emulation and exchange serial
-bytes, exactly as two consoles joined by a cable do. That is why it needs no
-configuration, and why it tolerates latency and packet loss that would break a
-state-synchronised session.
-
-A host that ignores env 78 simply gets a normal single-player core. This
-replaces the old gambatte link path; the netpacket transport is the one Trophy
-Hub drives on every platform.
+A host that ignores env 78 simply gets a normal single-player core.
 
 ## License
 
