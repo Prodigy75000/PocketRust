@@ -22,11 +22,11 @@ The core passes major CPU timing and graphics compatibility tests and runs most 
 | HuC3 clock + IR | ✅ a separate clock in HuC3's own format (minutes since midnight, days) behind its command mailbox, persisted in the `.srm` under its own magic. The IR port answers "no signal", so software polling it gets a quiet line rather than a reply that never comes. Robopon and Pocket Family boot |
 | Colorization | ✅ the GBC boot ROM's own per-cartridge palette for monochrome games, byte-exact |
 | Super Game Boy | ✅ command decoding over the joypad lines, VRAM transfers read off the rendered frame, palettes, per-tile attributes, and the **decorative border** composed into a 256x224 frame (`docs/SGB.md`). Opt-in via `pocketrust_sgb`, off by default and read at load only |
-| Save states | ✅ full machine state, bit-identical round-trip (video + audio) |
+| Save states | ✅ full machine state, including video and audio; a state reloads exactly as it was saved |
 | Link cable | ✅ serial transfer: local, TCP between two instances, and GameLink sessions over the libretro netpacket interface (`pocketrust-link-4`) |
 | Game Boy Printer | ✅ full packet protocol on the link port, including RLE; pages joined on the printer's own margins and written as PNG (`docs/PRINTER.md`). Verified against Pokemon Yellow printing a Pokedex entry |
 | GameLink transport | ✅ sequenced paired exchange, sub-frame polling, retransmit; byte-perfect through 1-in-3 packet loss |
-| Demo cartridge | ✅ an original, CC0 Game Boy Color cartridge in `roms/pocketrust-demo/`, assembled by the SM83 assembler in this repo, reproducible byte for byte |
+| Demo cartridge | ✅ an original, CC0 Game Boy Color cartridge in `roms/pocketrust-demo/`, assembled by the SM83 assembler in this repo |
 | Memory map | ✅ full descriptor table (work RAM, high RAM, VRAM, OAM, ROM bank 0, cart RAM, CGB banks 2-7) plus the legacy SYSTEM_RAM / SAVE_RAM ids, so achievements, cheats and RAM watch all address the core |
 
 Compatibility: **5190 of 5344** GB / GBC ROMs (97.1%) boot and render, in a

@@ -61,17 +61,10 @@ core, the cartridge and the file path were all fine. That is an evening. A
 client with no toggle still owes the player a sentence, in whatever surface it
 has.
 
-GameLink and netplay are **not** synonyms here, and the difference decides
-whether that paragraph applies to you. Netplay means deterministic input
-lockstep, and Game Boy does not have it: Trophy Hub's `netplayReady` list is
-NES, SNES, Mega Drive, PS1, N64 and friends, with no Game Boy slot in it.
-GameLink is the serial tunnel, carried over the libretro netpacket interface
-this core implements, and Game Boy very much does have it: it has been the
-default GB/GBC link path since PocketRust graduated on 2026-08-04, and 0.10.28
-shipped cross-device trading on it.
-
-So this is a real conflict a user can reach, not a defensive branch. Two people
-mid-trade is exactly when a silently dead printer toggle would be noticed.
+This is a real conflict a player can reach rather than a defensive branch:
+GameLink is the serial tunnel this core implements over the libretro netpacket
+interface, it is the default GB/GBC link path, and two people mid-trade is
+exactly when a silently dead printer would be noticed.
 
 **Make it escapable before you make it legible.** TH-iOS found their in-game
 "Turn off LAN" ended the session but left the switch on, so it re-armed on the
