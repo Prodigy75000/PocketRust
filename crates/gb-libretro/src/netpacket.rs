@@ -80,7 +80,18 @@ unsafe impl Sync for RetroNetpacketCallback {}
 ///
 /// The v4 bump matters: a v3 responder queues the byte a second time when a
 /// clock is retransmitted, silently shifting every later byte of a trade by one.
-/// A peer on an older version must refuse the session rather than corrupt it.
+///
+/// **A peer on an older version ought to refuse the session, and nothing makes
+/// it.** libretro hands this string to the frontend precisely so two peers can
+/// reject each other, and the host prints it without ever comparing it, so the
+/// refusal is not merely unused, it has been removed. The wire cannot cover for
+/// that either: `on_packet` dispatches on a tag and a length, so a mismatched
+/// peer is parsed rather than rejected.
+///
+/// It is harmless TODAY only because v3 never shipped: it lived for part of one
+/// day and every release from v0.2.0 carries v4, so there is no peer to mismatch
+/// with. Bumping to v5 is what would make it real. Read
+/// `the_wire_protocol_version_is_pinned` in gb-core's link tests first.
 static PROTOCOL: &[u8] = b"pocketrust-link-4\0";
 
 /// The callback struct handed to the frontend via env 78.
@@ -276,5 +287,27 @@ impl LinkCable for NetpacketLink {
             poll_receive();
         }
         with_net(|n| n.proto.poll_slave_input())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wire version is written out twice: once in `gb-core` as the
+    /// protocol's own statement of what it speaks, and once here as the
+    /// NUL-terminated C string handed to the frontend. Bumping one and not the
+    /// other would announce a version the core does not implement, and nothing
+    /// at runtime would notice, because nothing compares the string at all.
+    #[test]
+    fn the_announced_protocol_matches_the_one_the_core_speaks() {
+        let announced = PROTOCOL
+            .strip_suffix(b"\0")
+            .expect("the frontend reads this as a C string, so it must be NUL terminated");
+        assert_eq!(
+            announced,
+            gb_core::PROTOCOL_VERSION.as_bytes(),
+            "gb-libretro announces a different link version than gb-core speaks"
+        );
     }
 }

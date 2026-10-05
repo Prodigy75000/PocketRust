@@ -946,6 +946,45 @@ mod tests {
         assert!(!peer.take_peer_gave_up(), "and only learn it once");
     }
 
+    /// **Read this before changing `PROTOCOL_VERSION`.**
+    ///
+    /// Nothing refuses a mismatched peer. The wire has no magic and no version
+    /// byte: `on_packet` dispatches on a tag and a minimum length, so a peer
+    /// speaking a different revision is not rejected, it is PARSED. And
+    /// libretro's own mechanism for this, the protocol string handed to the
+    /// frontend, is discarded: Trophy Hub's host prints it and never compares
+    /// it, so the refusal libretro offers has been removed rather than made
+    /// harmless. (Found by TH-PocketRustAdvance and TH-iOS, 2026-10-05.)
+    ///
+    /// Today that is harmless, which is the only reason this is a tripwire
+    /// rather than a bug. v3 existed for part of one day, 2026-08-05, between
+    /// e7f44d9 and 10441f0, and **no release ever shipped it**: every tag from
+    /// v0.2.0 onward contains v4. There is no peer in the world to mismatch
+    /// with.
+    ///
+    /// Bumping to v5 is what makes it real, because v4 IS in the wild, in every
+    /// release. The failure would not be a dead cable, which is the survivable
+    /// kind. v4 retransmits an unanswered clock, and any peer without
+    /// `is_new_clock`/`mark_seen` answers the retransmit by queueing the byte a
+    /// SECOND time: duplicated bytes in a trade stream, corrupt party data, and
+    /// a wire that looks healthy throughout. See
+    /// `a_retransmitted_clock_is_not_delivered_twice` for the suppression that
+    /// makes v4 safe against itself and that an older peer does not have.
+    ///
+    /// So before bumping this, do one of:
+    ///   - get the host to compare `protocol_version` and refuse, which fixes
+    ///     every core at once and is where the mechanism belongs; or
+    ///   - add a version announcement the peer can act on, remembering that an
+    ///     old peer cannot be taught to announce retroactively, so the new side
+    ///     has to treat silence as "older" and refuse.
+    #[test]
+    fn the_wire_protocol_version_is_pinned() {
+        assert_eq!(
+            PROTOCOL_VERSION, "pocketrust-link-4",
+            "changing this strands every released build: read the comment above"
+        );
+    }
+
     /// Abandoning an exchange we are not waiting on is silent — no phantom
     /// give-up packet for the peer to misread.
     #[test]
