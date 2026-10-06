@@ -182,6 +182,26 @@ pub fn poll_receive() {
 
 // --- Frontend-facing callbacks (fire on the emulation thread) -----------------
 
+/// Session start. **Store the callbacks and send NOTHING.**
+///
+/// The host calls this from `start_locked` in `netpacket_transport.cpp` while
+/// holding `g_mutex`, and `send_fn` takes that same non-recursive mutex. So a
+/// packet sent from in here deadlocks the app, deterministically rather than as
+/// a race. TH-PocketRustAdvance added an identity announcement to theirs and got
+/// a ten-second freeze and an Android ANR on the first session, with no
+/// heartbeat at all because the emulator never reached its sixtieth frame.
+///
+/// This matters more than it looks, because every reason to send at session
+/// start is a good one: a hello, a version exchange, a capability packet. All of
+/// them belong in the outbox, flushed from `retro_run`. `the_session_start_callback_sends_nothing`
+/// below fails if anything sends from here.
+///
+/// `client_id` is ignored on purpose, and is not a stable identity: the two ends
+/// of one session disagree about it. Measured on the owner's pair, each device
+/// numbered the OTHER peer 1 and itself 0, and the same two devices came out the
+/// other way round in an earlier session. Nothing here may index per-side state
+/// by it. The Game Boy is immune by construction, since master and slave come
+/// from the game writing SC rather than from peer numbering.
 unsafe extern "C" fn np_start(_client_id: u16, send_fn: SendFn, poll_receive_fn: PollReceiveFn) {
     with_net(|n| {
         n.send_fn = Some(send_fn);
@@ -293,6 +313,34 @@ impl LinkCable for NetpacketLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SENT: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "C" fn recording_send(_f: i32, _b: *const c_void, _l: usize, _c: u16) {
+        SENT.store(true, Ordering::SeqCst);
+    }
+    unsafe extern "C" fn noop_poll() {}
+
+    /// Sending from `np_start` deadlocks the app, so prove it does not.
+    ///
+    /// The host calls `np_start` while holding the same non-recursive mutex
+    /// that `send_fn` takes, which is a deterministic hang rather than a race:
+    /// a ten-second freeze and an ANR, on the first session, with no frames.
+    /// This is a plausible thing to add by accident because every reason to do
+    /// it is sound, so the guard is the test rather than the comment.
+    #[test]
+    fn the_session_start_callback_sends_nothing() {
+        SENT.store(false, Ordering::SeqCst);
+        unsafe {
+            np_start(0, recording_send, noop_poll);
+            assert!(
+                !SENT.load(Ordering::SeqCst),
+                "np_start sent a packet: the host holds g_mutex across this call                  and send_fn takes it, so this deadlocks. Queue it and flush                  from retro_run instead."
+            );
+            np_stop(); // leave no session armed for the next test
+        }
+    }
 
     /// The wire version is written out twice: once in `gb-core` as the
     /// protocol's own statement of what it speaks, and once here as the

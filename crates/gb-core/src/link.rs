@@ -976,7 +976,12 @@ mod tests {
     ///     every core at once and is where the mechanism belongs; or
     ///   - add a version announcement the peer can act on, remembering that an
     ///     old peer cannot be taught to announce retroactively, so the new side
-    ///     has to treat silence as "older" and refuse.
+    ///     has to treat silence as "older" and refuse. **It cannot be sent from
+    ///     the env-78 `start` callback**, which is where it obviously belongs:
+    ///     the host holds a non-recursive mutex across that call and `send_fn`
+    ///     takes the same one, so it deadlocks the app outright. Queue it and
+    ///     flush from `retro_run`. See `the_session_start_callback_sends_nothing`
+    ///     in `gb-libretro`'s netpacket tests.
     #[test]
     fn the_wire_protocol_version_is_pinned() {
         assert_eq!(
