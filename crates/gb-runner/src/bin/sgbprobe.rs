@@ -5,8 +5,7 @@ use std::collections::HashSet;
 fn main() {
     let mut a = std::env::args().skip(1);
     let rom = std::fs::read(a.next().expect("usage: sgbprobe <rom>")).unwrap();
-    let mut gb = GameBoy::new(rom);
-    gb.set_sgb(std::env::var_os("SGB").is_some());
+    let mut gb = GameBoy::with_sgb(rom, std::env::var_os("SGB").is_some());
     println!("declares SGB = {}", gb.supports_sgb());
 
     // A PC histogram over one frame at the end: a stuck game spends all of it

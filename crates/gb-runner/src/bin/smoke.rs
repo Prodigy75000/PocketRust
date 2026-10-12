@@ -48,12 +48,11 @@ fn mbc_name(t: u8) -> &'static str {
 /// more than one colour at ANY sampled point (robust to mid-transition black
 /// frames), which is the real "didn't boot" signal.
 fn run_one(rom: Vec<u8>) -> (bool, bool) {
-    let mut gb = GameBoy::new(rom);
     // SGB=1 answers the detection handshake, which is what the disabled-by-
     // default switch exists to avoid. Used to measure the damage, not to ship.
-    if std::env::var_os("SGB").is_some() {
-        gb.set_sgb(true);
-    }
+    // Passed to the constructor because it picks the MACHINE: an SGB is DMG
+    // hardware, so a Color-capable cartridge must not find a Color Game Boy.
+    let mut gb = GameBoy::with_sgb(rom, std::env::var_os("SGB").is_some());
     gb.set_colorization(Colorize::Auto);
     let mut any_audio = false;
     let mut max_colors = 0usize;

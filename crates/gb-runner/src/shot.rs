@@ -30,11 +30,10 @@ fn main() {
     let camera = std::env::var("GBCAMERA").ok();
 
     let rom = std::fs::read(&rom_path).expect("failed to read ROM");
-    let mut gb = GameBoy::new(rom);
-    // SGB=1 answers the Super Game Boy handshake, for shooting SGB palettes.
-    if std::env::var_os("SGB").is_some() {
-        gb.set_sgb(true);
-    }
+    // SGB=1 answers the Super Game Boy handshake, for shooting SGB palettes and
+    // borders. Passed to the constructor because it picks the machine: an SGB
+    // is DMG hardware and a Color-capable cartridge must not find a CGB.
+    let mut gb = GameBoy::with_sgb(rom, std::env::var_os("SGB").is_some());
     match std::env::var("GBCOLOR").as_deref() {
         Ok("auto") => gb.set_colorization(gb_core::Colorize::Auto),
         Ok("grayscale") => gb.set_colorization(gb_core::Colorize::Grayscale),

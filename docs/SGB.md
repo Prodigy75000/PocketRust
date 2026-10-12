@@ -93,6 +93,33 @@ printer and camera paths read that buffer, so a screenshot would carry them, and
 "native" aspect would be constrained to the wrong ratio. Bars the frontend draws
 are layout and are the frontend's business.
 
+## A Super Game Boy is a DMG, and that decides the machine
+
+There is no console that is both a Super Game Boy and a Color Game Boy. So when
+the option is on, a Color-capable cartridge is run as a **monochrome** Game Boy.
+
+This is not a detail. A cartridge supporting both asks what it is running on,
+takes its Color path when it finds a CGB, and only reaches its Super Game Boy
+path otherwise. Report both and the game takes the Color path and never sends a
+border. Pokemon Yellow did exactly that: SGB enabled, border enabled, four empty
+palettes over an all-zero tilemap, because nothing had ever asked it for one.
+
+Measured over the full 5344-cartridge set, deciding the machine correctly turns
+**70 blank cartridges into rendering ones** with the option on.
+
+The flag therefore has to be passed to `GameBoy::with_sgb` at construction: the
+mode is threaded into the CPU and the MMU when they are built, and `set_sgb`
+alone cannot undo it. `new()` plus `set_sgb(true)` is the shape of the bug.
+
+Color-ONLY cartridges (`$C0` at `$0143`) are left as Color. They refuse to boot
+on monochrome hardware, so a real SGB could not play them, and forcing DMG would
+model a console that cannot run the cartridge rather than one that can.
+
+**The trade is real and worth stating.** With the option on, 751 of the
+cartridges in that set lose their Color output and gain a border plus SGB
+palettes. That is what the hardware did, and it is why the option is off by
+default.
+
 ## The mask, and how it is really cancelled
 
 `MASK_EN` ($17) freezes, blackens or blanks the screen until cancelled, and it
@@ -140,11 +167,21 @@ SGB=1 cargo run -p gb-runner --release --bin smoke -- dumps/roms
 
 ## What it costs
 
-Measured 2026-09-22 over the 549 cartridges in `dumps/roms`: **zero**. Seven
-blank either way, the same seven titles, all prototypes, betas and unlicensed
-dumps plus The Smurfs Rev 1. Twenty-one more cartridges fall into the smoke
-test's "silent" bucket with SGB on.
+Measured over the full 5344-cartridge set:
 
-An older figure of 52 regressions came from a 5344-cartridge set that is not on
-this machine, so the two are not comparable and the larger set should be
-re-measured before either number is quoted as final.
+```
+                       clean   blank   silent
+SGB off (the default)   4818     154      470
+SGB on                  4696     142      597
+```
+
+**It costs no blank screens at all; it removes twelve.** The option renders
+slightly more of the library than the default does, which was not true before
+the DMG rule above. What it costs is 127 cartridges moving into the smoke test's
+"silent" bucket, which is a soft signal: a game that spends longer in its SGB
+handshake and transfers may simply not reach its music inside the 900-frame
+sample.
+
+For the record, since the figure was quoted for a long time: applying MASK_EN
+used to cost 99 cartridges and running SGB at all used to cost 52. Both numbers
+were symptoms of bugs since fixed, not properties of the feature.

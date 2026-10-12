@@ -9,8 +9,7 @@ fn main() {
     let out = a.next().expect("need an output path");
     let frames: u32 = a.next().and_then(|v| v.parse().ok()).unwrap_or(1200);
 
-    let mut gb = GameBoy::new(std::fs::read(&rom_path).unwrap());
-    gb.set_sgb(true);
+    let mut gb = GameBoy::with_sgb(std::fs::read(&rom_path).unwrap(), true);
     for _ in 0..frames {
         gb.step_frame();
     }

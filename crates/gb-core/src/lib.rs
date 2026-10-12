@@ -60,12 +60,45 @@ impl GameBoy {
     /// Create a Game Boy with the given cartridge ROM loaded, positioned as if
     /// the boot ROM has just handed control to the cartridge at 0x0100.
     pub fn new(rom: Vec<u8>) -> GameBoy {
+        GameBoy::with_sgb(rom, false)
+    }
+
+    /// Create a Game Boy, saying up front whether this is a Super Game Boy
+    /// session, because that decides which MACHINE to build.
+    ///
+    /// **A Super Game Boy is DMG-class hardware. There is no console that is
+    /// both an SGB and a Color Game Boy.** A cartridge supporting both asks
+    /// which it is in, takes its Color path when it finds a CGB, and only
+    /// reaches its SGB path otherwise. So a core reporting BOTH gets the Color
+    /// path and never sends a border, which is exactly what Pokemon Yellow did:
+    /// SGB enabled, border enabled, and four empty palettes over an all-zero
+    /// tilemap, because the game had never been asked for one.
+    ///
+    /// Only for cartridges that run on monochrome hardware at all. A Color-only
+    /// cartridge would not boot in a real SGB, so forcing it to DMG would model
+    /// a machine that cannot play it rather than one that can.
+    ///
+    /// This has to happen at construction: the mode is threaded into the CPU
+    /// and the MMU when they are built, so `set_sgb` alone cannot undo it.
+    pub fn with_sgb(rom: Vec<u8>, sgb: bool) -> GameBoy {
         let cartridge = Cartridge::new(rom);
-        let cgb = cartridge.is_cgb();
-        GameBoy {
+        let as_sgb = sgb && cartridge.runs_on_dmg();
+        let cgb = cartridge.is_cgb() && !as_sgb;
+        let mut gb = GameBoy {
             cpu: Cpu::new(cgb),
             mmu: Mmu::new(cartridge, cgb),
-        }
+        };
+        gb.set_sgb(sgb);
+        gb
+    }
+
+    /// Which machine this actually is: a Color Game Boy, or a monochrome one.
+    ///
+    /// Not always what the cartridge header asks for. A Super Game Boy session
+    /// builds a DMG even for a Color-capable cartridge, because that is the
+    /// hardware an SGB is. See `with_sgb`.
+    pub fn is_cgb_mode(&self) -> bool {
+        self.mmu.ppu.cgb
     }
 
     /// Answer as a Super Game Boy, if the cartridge asks.

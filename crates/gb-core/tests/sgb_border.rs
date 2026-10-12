@@ -21,8 +21,9 @@ fn load(rel: &str) -> Option<GameBoy> {
         eprintln!("skipping: needs {rel}");
         return None;
     }
-    let mut gb = GameBoy::new(std::fs::read(&path).ok()?);
-    gb.set_sgb(true);
+    // with_sgb, not new-then-set_sgb: the flag picks the MACHINE, and a
+    // Colour-capable cartridge handed a CGB never reaches its SGB path.
+    let mut gb = GameBoy::with_sgb(std::fs::read(&path).ok()?, true);
     for _ in 0..1400 {
         gb.step_frame();
     }
@@ -184,4 +185,62 @@ fn a_cartridge_with_sgb_switched_off_is_never_composed() {
     let mut out = vec![0u32; 256 * 224];
     assert!(!gb.sgb_compose(&mut out), "SGB is off, so there is nothing to compose");
     assert!(out.iter().all(|p| *p == 0), "compose declined but still wrote pixels");
+}
+
+/// A Super Game Boy is DMG hardware, so a Color-capable cartridge must not
+/// find a Color Game Boy when one is asked for.
+///
+/// There is no console that is both. A cartridge supporting both asks which it
+/// is in, takes its Color path when it finds a CGB, and only reaches its SGB
+/// path otherwise. Reporting both got Pokemon Yellow's Color path and no
+/// border at all: four empty palettes over an all-zero tilemap, because the
+/// game had never been asked for one.
+#[test]
+fn a_super_game_boy_session_builds_a_dmg_for_a_colour_capable_cartridge() {
+    fn rom(cgb_flag: u8) -> Vec<u8> {
+        let mut r = vec![0u8; 0x8000];
+        r[0x0143] = cgb_flag;
+        r[0x0146] = 0x03; // SGB enhanced
+        r
+    }
+
+    // $80 is "uses Colour when it finds it, runs without it otherwise", which
+    // is what an SGB-enhanced Colour cartridge like Yellow carries.
+    assert!(GameBoy::new(rom(0x80)).is_cgb_mode(), "without SGB it is a CGB");
+    assert!(
+        !GameBoy::with_sgb(rom(0x80), true).is_cgb_mode(),
+        "an SGB session must build a DMG, or the cartridge takes its Colour path"
+    );
+
+    // $C0 is Colour ONLY: it refuses to boot on monochrome hardware, so a real
+    // SGB could not play it. Forcing DMG would model a machine that cannot run
+    // the cartridge rather than one that can.
+    assert!(
+        GameBoy::with_sgb(rom(0xC0), true).is_cgb_mode(),
+        "a Colour-only cartridge must stay a CGB even in an SGB session"
+    );
+
+    // And a plain monochrome cartridge is unaffected either way.
+    assert!(!GameBoy::new(rom(0x00)).is_cgb_mode());
+    assert!(!GameBoy::with_sgb(rom(0x00), true).is_cgb_mode());
+}
+
+/// The end-to-end property the rule exists for: Yellow draws a border.
+#[test]
+fn a_colour_capable_cartridge_still_sends_its_border() {
+    let rel = "dumps/roms/Pokemon - Yellow Version - Special Pikachu Edition (USA, Europe) (CGB+SGB Enhanced).gb";
+    let Some(gb) = load(rel) else { return };
+    assert!(!gb.is_cgb_mode(), "{rel}: an SGB session must run this as a DMG");
+
+    let pals = gb.sgb_border_palettes();
+    let colours: std::collections::HashSet<u32> = pals.iter().flatten().copied().collect();
+    assert!(
+        colours.len() >= 4,
+        "{rel}: {} distinct border colours. All-black palettes mean the \
+         cartridge took its Colour path and never sent a border.",
+        colours.len()
+    );
+    let border = gb.sgb_border().expect("Yellow sends CHR_TRN and PCT_TRN");
+    let solid = border.iter().filter(|p| p.is_some()).count();
+    assert!(solid > 10_000, "{rel}: only {solid} pixels of artwork");
 }

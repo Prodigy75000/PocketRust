@@ -548,7 +548,20 @@ impl Ppu {
         if self.cgb {
             cgb_rgb(&self.bg_pal, 0, 0)
         } else {
-            self.active_palette().bg[apply_palette(self.bgp, 0) as usize]
+            // Palette entry 0 DIRECTLY, deliberately not through BGP.
+            //
+            // BGP is the game's own fade control. Pokemon Blue rewrites it to
+            // map every index to black for a screen transition, and routing the
+            // backdrop through it dragged the border into the fade: the white
+            // in its Pokeballs and corner medallions went black for the length
+            // of every doorway. The SNES backdrop does not follow the Game
+            // Boy's palette register; the picture fades and the border stays
+            // lit, which is the whole point of the border being on the SNES.
+            //
+            // In normal play BGP maps index 0 to shade 0, so this is the same
+            // colour it always was. The two only diverge during a fade, which
+            // is exactly when the old answer was wrong.
+            self.active_palette().bg[0]
         }
     }
 
@@ -812,4 +825,46 @@ fn cgb_rgb(pal: &[u8; 64], palette: u8, color: u8) -> Pixel {
     // 5-bit -> 8-bit with the low bits replicated for a full-range white.
     let expand = |c: u32| (c << 3) | (c >> 2);
     (expand(r) << 16) | (expand(g) << 8) | expand(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A screen fade must not drag the Super Game Boy border into it.
+    ///
+    /// BGP is the game's own fade control: Pokemon Blue rewrites it to map
+    /// every index to the darkest shade for a doorway transition. The backdrop
+    /// used to be read THROUGH it, so every transparent pixel of the border
+    /// went black for the length of the fade and the Pokeballs lost their
+    /// whites. On the real thing the picture fades and the border stays lit,
+    /// because the border is on the SNES and BGP is not.
+    #[test]
+    fn the_backdrop_does_not_follow_a_bgp_fade() {
+        let mut ppu = Ppu::new(false);
+
+        // Normal play: index 0 maps to shade 0, so both readings agree and the
+        // bug was invisible.
+        ppu.bgp = 0xE4;
+        let lit = ppu.backdrop();
+
+        // The test is only worth anything if the two shades actually differ.
+        let pal = ppu.active_palette();
+        assert_ne!(
+            pal.bg[0], pal.bg[3],
+            "a palette whose lightest and darkest match cannot show this bug"
+        );
+
+        // A fade to black: every index to the darkest shade.
+        ppu.bgp = 0xFF;
+        assert_eq!(
+            ppu.backdrop(),
+            lit,
+            "the border went dark with the screen; the backdrop is reading through BGP"
+        );
+
+        // And the same the other way, a fade to white.
+        ppu.bgp = 0x00;
+        assert_eq!(ppu.backdrop(), lit, "the backdrop followed BGP to white");
+    }
 }

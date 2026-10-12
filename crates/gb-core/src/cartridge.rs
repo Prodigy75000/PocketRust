@@ -2106,6 +2106,16 @@ impl Cartridge {
         self.header.cgb_flag & 0x80 != 0
     }
 
+    /// Will this cartridge run on monochrome hardware?
+    ///
+    /// `$C0` means Color only and the cartridge refuses to boot on a DMG; `$80`
+    /// means it uses Color features when it finds them and runs without them
+    /// otherwise. That distinction decides whether a Super Game Boy can play it
+    /// at all, since an SGB is DMG-class hardware.
+    pub fn runs_on_dmg(&self) -> bool {
+        self.header.cgb_flag != 0xC0
+    }
+
     pub fn title_checksum(&self) -> u8 {
         self.header.title_checksum
     }

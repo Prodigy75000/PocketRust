@@ -754,7 +754,7 @@ pub extern "C" fn retro_reset() {
         // Power-cycle the machine but keep battery-backed save RAM, like a real
         // reset would.
         let sram = s.gb.as_ref().map(|gb| gb.sram().to_vec());
-        let mut gb = GameBoy::new(s.rom.clone());
+        let mut gb = GameBoy::with_sgb(s.rom.clone(), s.sgb_wanted);
         if let Some(sram) = sram {
             if gb.has_battery() {
                 gb.load_sram(&sram);
@@ -806,7 +806,13 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
         return false;
     }
 
+    // Read BEFORE the machine is built, because it decides which machine.
+    // A Super Game Boy is DMG hardware, so a cartridge that supports both must
+    // not be handed a Color Game Boy to find. See `GameBoy::with_sgb`.
+    let sgb = with_state(|s| read_option(s, OPT_SGB, "off")) == "on";
+
     with_state(|s| {
+        s.sgb_wanted = sgb;
         // Ask the host for 32-bit XRGB8888 video.
         if let Some(env) = s.env {
             let mut fmt = RETRO_PIXEL_FORMAT_XRGB8888;
@@ -816,7 +822,7 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
             );
         }
         s.rom = rom.clone();
-        let mut gb = GameBoy::new(rom);
+        let mut gb = GameBoy::with_sgb(rom, sgb);
         // Default to authentic per-game GBC colorization so DMG games look right
         // out of the box (parity with Gambatte's default-on colorization). A
         // host that exposes the option overrides this in refresh_variables.
@@ -851,12 +857,9 @@ pub unsafe extern "C" fn retro_load_game(info: *const retro_game_info) -> bool {
     // advertisement. Hiding only the control leaves a stored preference on the
     // wire, so anyone who enabled it in an older build keeps getting it with no
     // way to switch it off. TH-Android hit exactly that on their side.
-    let sgb = with_state(|s| read_option(s, OPT_SGB, "off")) == "on";
+    // Already read and applied above, before the machine was built, because it
+    // chooses between a DMG and a Color Game Boy. All that is left is to say so.
     with_state(|s| {
-        s.sgb_wanted = sgb;
-        if let Some(gb) = &mut s.gb {
-            gb.set_sgb(sgb);
-        }
         // A cartridge with no SGB flag in its header ignores the request, so
         // this reports what the core will actually DO rather than what was
         // asked for. "I turned it on and nothing happened" otherwise has two

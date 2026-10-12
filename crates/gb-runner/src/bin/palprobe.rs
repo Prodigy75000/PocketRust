@@ -18,8 +18,7 @@ use gb_core::GameBoy;
 
 fn main() {
     let rom = std::env::args().nth(1).expect("usage: palprobe <rom>");
-    let mut gb = GameBoy::new(std::fs::read(&rom).unwrap());
-    gb.set_sgb(true);
+    let mut gb = GameBoy::with_sgb(std::fs::read(&rom).unwrap(), true);
     for _ in 0..1400 {
         gb.step_frame();
     }
