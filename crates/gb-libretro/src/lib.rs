@@ -113,8 +113,14 @@ const RETRO_PIXEL_FORMAT_XRGB8888: i32 = 1;
 /// and that such a value may be stale. `-dirty` means the tree had uncommitted
 /// changes, so the commit names where the build started and not what it
 /// contains.
+// `#[used]` alone is not enough. It survives the GNU linker and the MSVC one
+// strips it: a Windows DLL built this way carried no POCKETRUST_FEATURES string
+// at all, so the deploy guard had nothing to grep and nobody could tell which
+// commit the binary came from. `#[no_mangle] pub` puts it in the export table,
+// which both linkers keep.
 #[used]
-static BUILD_FEATURES: &[u8] = concat!(
+#[no_mangle]
+pub static BUILD_FEATURES: &[u8] = concat!(
     "POCKETRUST_FEATURES:printer,camera,tilt,rumble,gamelink,colorize,sgb",
     " build=",
     env!("POCKETRUST_BUILD_ID"),
